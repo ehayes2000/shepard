@@ -152,9 +152,11 @@ impl Session {
         had_data
     }
 
-    pub fn render_screen(&self, stdout: &mut impl IoWrite) -> Result<()> {
+    pub fn render_screen(&mut self, stdout: &mut impl IoWrite) -> Result<()> {
+        // Make sure we've processed all pending data before getting cursor position
+        self.drain_output();
+
         let screen = self.terminal.screen();
-        let cursor = self.terminal.cursor_pos();
         let rows = screen.physical_rows;
 
         // Convert visible row range (0..rows) to physical row range
@@ -166,10 +168,21 @@ impl Session {
         let mut current_bg: Option<Color> = None;
 
         for (row_idx, line) in lines.iter().enumerate() {
-            write!(stdout, "\x1b[{};{}H", row_idx + 1, 1)?;
+            // Position at start of line
+            write!(stdout, "\x1b[{};1H", row_idx + 1)?;
+
+            let mut current_col = 0usize;
 
             // Use visible_cells() which handles both compressed and uncompressed storage
             for cell in line.visible_cells() {
+                let cell_col = cell.cell_index();
+
+                // If there's a gap, fill with spaces
+                while current_col < cell_col {
+                    write!(stdout, " ")?;
+                    current_col += 1;
+                }
+
                 let attrs = cell.attrs();
 
                 // Handle foreground color
@@ -195,11 +208,13 @@ impl Session {
                 }
 
                 let text = cell.str();
+                let width = cell.width();
                 if text.is_empty() {
                     write!(stdout, " ")?;
                 } else {
                     write!(stdout, "{}", text)?;
                 }
+                current_col += width;
             }
 
             // Reset colors and clear to end of line
@@ -208,8 +223,10 @@ impl Session {
             current_bg = None;
         }
 
-        // Position cursor (cursor.x and cursor.y are 0-based)
-        write!(stdout, "\x1b[{};{}H", cursor.y + 1, cursor.x + 1)?;
+        // cursor_pos() returns wrong x value (always 0) for Claude Code - wezterm-term bug.
+        // Don't explicitly position cursor - let it stay where last write left it.
+        // This is a workaround until the cursor tracking bug is fixed.
+
         stdout.flush()?;
         Ok(())
     }
