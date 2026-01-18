@@ -1,4 +1,3 @@
-mod config;
 mod session;
 mod session_manager;
 
@@ -9,7 +8,7 @@ fn main() -> anyhow::Result<()> {
 
     // Create sessions
 
-    manager.add_session_active("btop", "btop", &[])?;
+    manager.add_session_active("btop", "htop", &[])?;
     manager.add_session_active("claude", "claude", &[])?;
 
     eprintln!("Starting session manager...");
