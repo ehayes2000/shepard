@@ -103,7 +103,6 @@ impl SharedSize {
 }
 
 pub struct Session {
-    pub name: String,
     active: Arc<AtomicBool>,
     writer: SharedWriter,
     _reader_thread: JoinHandle<()>,
@@ -145,7 +144,6 @@ impl DerefMut for AttachedSession {
 
 impl AttachedSession {
     pub fn new(
-        name: &str,
         command: &str,
         args: &[&str],
         tx: Sender<Screen>,
@@ -211,8 +209,6 @@ impl AttachedSession {
                         if !is_active {
                             continue;
                         }
-                        let screen = parser.screen().to_owned();
-                        tx.send(screen).expect("Send screen");
                     }
                     Err(_) => break,
                 }
@@ -220,7 +216,6 @@ impl AttachedSession {
         });
 
         Ok(Self(Session {
-            name: name.to_string(),
             active,
             writer,
             _reader_thread: reader_thread,
