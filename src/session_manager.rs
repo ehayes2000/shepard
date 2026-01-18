@@ -24,9 +24,40 @@ use crate::workflows::{Workflow, WorktreeWorkflow};
 
 const BUF_SIZE: usize = 1024;
 const CTRL_K: u8 = 0x0B;
+const CTRL_T: u8 = 0x14;
 
-fn is_hotkey(bytes: &[u8]) -> bool {
+fn is_menu_hotkey(bytes: &[u8]) -> bool {
     bytes.len() == 1 && bytes[0] == CTRL_K
+}
+
+fn is_shell_hotkey(bytes: &[u8]) -> bool {
+    bytes.len() == 1 && bytes[0] == CTRL_T
+}
+
+/// Which view is currently active in a session pair
+#[derive(Clone, Copy, PartialEq, Default)]
+enum SessionView {
+    #[default]
+    Claude,
+    Shell,
+}
+
+/// An active session pair - both claude and shell are attached (can receive input)
+pub struct ActivePair {
+    name: String,
+    path: PathBuf,
+    view: SessionView,
+    claude: AttachedSession,
+    shell: Option<AttachedSession>,
+}
+
+/// A background session pair - both sessions are detached
+pub struct BackgroundPair {
+    name: String,
+    path: PathBuf,
+    last_view: SessionView,
+    claude: DetachedSession,
+    shell: Option<DetachedSession>,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -40,8 +71,8 @@ enum UiMode {
 
 pub struct TuiSessionManager {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
-    active: Option<(String, PathBuf, AttachedSession)>,
-    background: Vec<(String, PathBuf, DetachedSession)>,
+    active: Option<ActivePair>,
+    background: Vec<BackgroundPair>,
     size: SharedSize,
     mode: UiMode,
     picker_state: ListState,
@@ -105,22 +136,43 @@ impl TuiSessionManager {
         })
     }
 
-    pub fn add_session(
+    fn create_session(
+        &self,
+        command: &str,
+        args: &[&str],
+        cwd: &Path,
+    ) -> anyhow::Result<AttachedSession> {
+        let (tx, _rx) = mpsc::channel::<Screen>();
+        AttachedSession::new(command, args, tx, self.size.clone(), Some(cwd))
+    }
+
+    pub fn add_claude_session(
         &mut self,
         name: &str,
         command: &str,
         args: &[&str],
         cwd: &Path,
     ) -> anyhow::Result<()> {
-        let (tx, _rx) = mpsc::channel::<Screen>();
-        let session = AttachedSession::new(command, args, tx, self.size.clone(), Some(cwd))?;
+        let session = self.create_session(command, args, cwd)?;
 
-        if let Some((old_name, old_path, old_session)) = self.active.take() {
-            self.background
-                .push((old_name, old_path, old_session.detach()));
+        // Background the current active pair if any
+        if let Some(old_pair) = self.active.take() {
+            self.background.push(BackgroundPair {
+                name: old_pair.name,
+                path: old_pair.path,
+                last_view: old_pair.view,
+                claude: old_pair.claude.detach(),
+                shell: old_pair.shell.map(|s| s.detach()),
+            });
         }
 
-        self.active = Some((name.to_string(), cwd.to_path_buf(), session));
+        self.active = Some(ActivePair {
+            name: name.to_string(),
+            path: cwd.to_path_buf(),
+            view: SessionView::Claude,
+            claude: session,
+            shell: None,
+        });
         Ok(())
     }
 
@@ -128,12 +180,15 @@ impl TuiSessionManager {
         let metadata = self
             .workflow
             .pre_session_hook(name, &self.config, &self.startup_path)?;
-        self.config
-            .set_recent_session(self.startup_path.clone(), name.to_string(), metadata.path.clone())?;
+        self.config.set_recent_session(
+            self.startup_path.clone(),
+            name.to_string(),
+            metadata.path.clone(),
+        )?;
 
         let args_owned = self.config.claude_args.clone();
         let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
-        self.add_session(name, "claude", &args, &metadata.path)
+        self.add_claude_session(name, "claude", &args, &metadata.path)
     }
 
     /// Try to resume a previous session. Returns true if resumed, false if no session to resume.
@@ -148,7 +203,7 @@ impl TuiSessionManager {
         args_owned.extend(self.config.claude_args.clone());
         let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
 
-        self.add_session(&recent.name, "claude", &args, &recent.path)?;
+        self.add_claude_session(&recent.name, "claude", &args, &recent.path)?;
         Ok(true)
     }
 
@@ -185,11 +240,23 @@ impl TuiSessionManager {
     }
 
     fn render_frame(&mut self) -> anyhow::Result<Rect> {
-        let screen = self.active.as_ref().map(|(_, _, s)| s.get_screen());
-        let active_name = self.active.as_ref().map(|(n, _, _)| n.clone());
-        let active_path = self.active.as_ref().map(|(_, p, _)| p.clone());
-        let session_names: Vec<String> =
-            self.background.iter().map(|(n, _, _)| n.clone()).collect();
+        let (screen, active_view) = match &self.active {
+            Some(pair) => {
+                let screen = match pair.view {
+                    SessionView::Claude => pair.claude.get_screen(),
+                    SessionView::Shell => pair
+                        .shell
+                        .as_ref()
+                        .map(|s| s.get_screen())
+                        .unwrap_or_else(|| pair.claude.get_screen()),
+                };
+                (Some(screen), pair.view)
+            }
+            None => (None, SessionView::Claude),
+        };
+        let active_name = self.active.as_ref().map(|p| p.name.clone());
+        let active_path = self.active.as_ref().map(|p| p.path.clone());
+        let session_names: Vec<String> = self.background.iter().map(|p| p.name.clone()).collect();
         let background_count = self.background.len();
         let mode = self.mode.clone();
         let picker_selected = self.picker_state.selected();
@@ -203,6 +270,7 @@ impl TuiSessionManager {
                 screen.as_ref(),
                 active_name.as_deref(),
                 active_path.as_deref(),
+                active_view,
                 background_count,
                 &mode,
                 picker_selected,
@@ -215,10 +283,50 @@ impl TuiSessionManager {
     }
 
     fn handle_normal_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-        if is_hotkey(bytes) {
+        if is_menu_hotkey(bytes) {
             self.mode = UiMode::CommandMenu;
-        } else if let Some((_, _, ref mut session)) = self.active {
-            session.write_input(bytes)?;
+        } else if is_shell_hotkey(bytes) {
+            self.toggle_shell()?;
+        } else if let Some(ref mut pair) = self.active {
+            match pair.view {
+                SessionView::Claude => pair.claude.write_input(bytes)?,
+                SessionView::Shell => {
+                    if let Some(ref mut shell) = pair.shell {
+                        shell.write_input(bytes)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Toggle between Claude and Shell views, creating shell if needed
+    fn toggle_shell(&mut self) -> anyhow::Result<()> {
+        // Check if we need to create a shell session
+        let needs_shell = self
+            .active
+            .as_ref()
+            .map(|p| p.view == SessionView::Claude && p.shell.is_none())
+            .unwrap_or(false);
+
+        let path = self.active.as_ref().map(|p| p.path.clone());
+
+        if needs_shell {
+            if let Some(path) = path {
+                let shell_cmd = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                let shell_session = self.create_session(&shell_cmd, &[], &path)?;
+                if let Some(ref mut pair) = self.active {
+                    pair.shell = Some(shell_session);
+                }
+            }
+        }
+
+        // Toggle the view
+        if let Some(ref mut pair) = self.active {
+            match pair.view {
+                SessionView::Claude => pair.view = SessionView::Shell,
+                SessionView::Shell => pair.view = SessionView::Claude,
+            }
         }
         Ok(())
     }
@@ -229,7 +337,7 @@ impl TuiSessionManager {
         }
 
         // ESC or Ctrl+K to close
-        if bytes[0] == 0x1b || is_hotkey(bytes) {
+        if bytes[0] == 0x1b || is_menu_hotkey(bytes) {
             self.mode = UiMode::Normal;
             return Ok(());
         }
@@ -278,7 +386,7 @@ impl TuiSessionManager {
         }
 
         // Ctrl+K to go back to command menu
-        if is_hotkey(bytes) {
+        if is_menu_hotkey(bytes) {
             self.mode = UiMode::CommandMenu;
             return Ok(());
         }
@@ -312,7 +420,7 @@ impl TuiSessionManager {
         }
 
         // Ctrl+K to go back to command menu
-        if is_hotkey(bytes) {
+        if is_menu_hotkey(bytes) {
             self.create_input.clear();
             self.mode = UiMode::CommandMenu;
             return Ok(());
@@ -358,14 +466,27 @@ impl TuiSessionManager {
             return Ok(());
         }
 
-        let (bg_name, bg_path, bg_session) = self.background.remove(index);
+        let bg_pair = self.background.remove(index);
 
-        if let Some((old_name, old_path, old_session)) = self.active.take() {
-            self.background
-                .push((old_name, old_path, old_session.detach()));
+        // Background the current active pair
+        if let Some(old_pair) = self.active.take() {
+            self.background.push(BackgroundPair {
+                name: old_pair.name,
+                path: old_pair.path,
+                last_view: old_pair.view,
+                claude: old_pair.claude.detach(),
+                shell: old_pair.shell.map(|s| s.detach()),
+            });
         }
 
-        self.active = Some((bg_name, bg_path, bg_session.attach()?));
+        // Activate the selected background pair
+        self.active = Some(ActivePair {
+            name: bg_pair.name,
+            path: bg_pair.path,
+            view: bg_pair.last_view,
+            claude: bg_pair.claude.attach()?,
+            shell: bg_pair.shell.map(|s| s.attach()).transpose()?,
+        });
         Ok(())
     }
 }
@@ -392,6 +513,7 @@ fn render(
     screen: Option<&Arc<Screen>>,
     active_name: Option<&str>,
     active_path: Option<&Path>,
+    active_view: SessionView,
     background_count: usize,
     mode: &UiMode,
     picker_selected: Option<usize>,
@@ -400,8 +522,12 @@ fn render(
 ) -> Rect {
     let area = frame.area();
 
-    // Top title: session name (left-aligned)
-    let top_title = format!(" {} ", active_name.unwrap_or(""));
+    // Top title: session name with view indicator (left-aligned)
+    let view_indicator = match active_view {
+        SessionView::Claude => "",
+        SessionView::Shell => " [shell]",
+    };
+    let top_title = format!(" {}{} ", active_name.unwrap_or(""), view_indicator);
 
     // Bottom left: total session count (including active)
     let total_sessions = background_count + if active_name.is_some() { 1 } else { 0 };
@@ -411,11 +537,18 @@ fn render(
         String::new()
     };
 
-    // Bottom center: hotkey hint (styled like command menu keys)
+    // Bottom center: hotkey hints (styled like command menu keys)
     let bottom_center = Line::from(vec![
         Span::raw(" "),
         Span::styled(
             "ctrl+k",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "ctrl+t",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
