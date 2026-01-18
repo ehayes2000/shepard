@@ -14,12 +14,20 @@ use crate::session::{AttachedSession, DetachedSession, SharedSize};
 
 const BUF_SIZE: usize = 1024;
 
+type Callback = Box<dyn Fn(&mut SessionManager) + Send + Sync>;
+
+pub struct HotkeyCallback {
+    pub key: u8,
+    pub callback: Callback,
+}
+
 pub struct SessionManager {
     active_session: Option<AttachedSession>,
     detached_sessions: HashMap<String, DetachedSession>,
     reciever: Receiver<Screen>,
     sender: Sender<Screen>,
     size: SharedSize,
+    hotkeys: Vec<HotkeyCallback>,
 }
 
 impl SessionManager {
@@ -34,7 +42,12 @@ impl SessionManager {
             sender: tx,
             reciever: rx,
             size,
+            hotkeys: vec![],
         }
+    }
+
+    pub fn with_hotkeys(&mut self, hotkeys: Vec<HotkeyCallback>) {
+        self.hotkeys = hotkeys
     }
 
     pub fn add_session_active(
@@ -86,7 +99,7 @@ impl SessionManager {
         Ok(())
     }
 
-    fn switch_to_next(&mut self) -> anyhow::Result<()> {
+    pub fn switch_to_next(&mut self) -> anyhow::Result<()> {
         // Get the next session name
         if let Some(next_name) = self.detached_sessions.keys().next().cloned() {
             self.switch_to(&next_name)?;
@@ -116,7 +129,7 @@ impl SessionManager {
         let (_, mut reciever) = mpsc::channel();
         std::mem::swap(&mut reciever, &mut self.reciever);
         let shared_size = self.size.clone();
-
+        let hotkeys = std::mem::take(&mut self.hotkeys);
         let shared_self = std::sync::Arc::new(std::sync::Mutex::new(self));
         let shared = shared_self.clone();
         let stdin_thread = std::thread::spawn(move || {
@@ -129,9 +142,10 @@ impl SessionManager {
                     }
                     Ok(n) => {
                         let mut lock = shared.lock().expect("aquire lock stdin");
-                        if n == 1 && buf[0] == CTRL_B {
-                            lock.switch_to_next().expect("switch to next");
-                            stdout.flush().expect("flush");
+                        if n == 1
+                            && let Some(k) = hotkeys.iter().find(|k| k.key == buf[0])
+                        {
+                            (k.callback)(&mut *lock);
                         } else if let Some(session) = &mut lock.active_session {
                             session.write_input(&buf[..n]).expect("write");
                         }
