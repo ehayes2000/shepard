@@ -1,7 +1,6 @@
 use crossterm::{
     QueueableCommand,
     cursor::MoveTo,
-    style::Print,
     terminal::{Clear, ClearType, enable_raw_mode, size},
 };
 use signal_hook::consts::SIGWINCH;
@@ -9,9 +8,9 @@ use signal_hook::iterator::Signals;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
-use vt100::{Parser, Screen};
+use vt100::Screen;
 
-use crate::session::{AttachedSession, DetachedSession, SCROLLBACK, SharedSize};
+use crate::session::{AttachedSession, DetachedSession, SharedSize};
 
 const BUF_SIZE: usize = 1024;
 
@@ -156,23 +155,15 @@ impl SessionManager {
 
         let stdout_thread = std::thread::spawn(move || {
             let mut stdout = std::io::stdout();
-            // let mut prev = None::<Screen>;
             loop {
                 match reciever.recv() {
                     Ok(mut screen) => {
                         let (rows, cols) = shared_size.get();
                         screen.set_size(rows, cols);
-                        // let bytes = if let Some(prev) = prev {
-                        //     prev.state_diff(&screen)
-                        // } else {
-                        //     screen.state_formatted()
-                        // };
-                        //
                         let bytes = screen.state_formatted();
-
+                        // Reset scroll region, clear entire screen, home cursor
                         stdout.write_all(&bytes).expect("write state");
                         stdout.flush().expect("flush state");
-                        // prev = Some(screen)
                     }
                     Err(e) => {
                         eprintln!("error recieving output {:#?}", e);

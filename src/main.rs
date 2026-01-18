@@ -8,8 +8,9 @@ fn main() -> anyhow::Result<()> {
 
     // Create sessions
 
-    manager.add_session_active("btop", "htop", &[])?;
     manager.add_session_active("claude", "claude", &[])?;
+    // manager.add_session_active("btop", "lazygit", &["-p", "/Users/eric/Code/shepard"])?;
+    manager.add_session_active("btop", "btop", &["--force-utf"])?;
 
     eprintln!("Starting session manager...");
     eprintln!("Sessions: {:?}", manager.session_names());
