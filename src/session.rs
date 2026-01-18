@@ -2,6 +2,7 @@ use arc_swap::ArcSwap;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -146,8 +147,9 @@ impl AttachedSession {
     pub fn new(
         command: &str,
         args: &[&str],
-        tx: Sender<Screen>,
+        _tx: Sender<Screen>,
         size: SharedSize,
+        cwd: Option<&Path>,
     ) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
 
@@ -163,6 +165,9 @@ impl AttachedSession {
 
         let mut cmd = CommandBuilder::new(command);
         cmd.args(args);
+        if let Some(dir) = cwd {
+            cmd.cwd(dir);
+        }
 
         let _ = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
