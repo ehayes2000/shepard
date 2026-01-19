@@ -5,3 +5,9 @@ one line description of what you did.
 
 If a pr is more than a single commit then the body should contain the commit message of each commit
 otherwise the body should be left blank
+
+ALWAYS RUN BEFORE PR
+    `cargo clippy -- --Dwarnings`
+    `cargo fmt`
+
+
