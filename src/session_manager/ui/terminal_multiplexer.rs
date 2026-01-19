@@ -45,20 +45,8 @@ impl TerminalMultiplexer {
         Some(session)
     }
 
-    /// Focus the pane to the left (wraps around)
-    pub fn focus_left(&mut self) {
-        if self.panes.is_empty() {
-            return;
-        }
-        if self.active_pane == 0 {
-            self.active_pane = self.panes.len() - 1;
-        } else {
-            self.active_pane -= 1;
-        }
-    }
-
-    /// Focus the pane to the right (wraps around)
-    pub fn focus_right(&mut self) {
+    /// Cycle to the next pane (wraps around)
+    pub fn cycle_pane(&mut self) {
         if self.panes.is_empty() {
             return;
         }
@@ -110,16 +98,12 @@ impl TerminalMultiplexer {
 
     fn render_hotkey_bar(&self, frame: &mut Frame, area: Rect) {
         let hotkeys = Line::from(vec![
-            Span::styled(" Esc", Style::default().fg(Color::Magenta)),
-            Span::raw(" Claude  "),
-            Span::styled("^\\", Style::default().fg(Color::Magenta)),
+            Span::styled(" ^\\", Style::default().fg(Color::Magenta)),
             Span::raw(" Split  "),
             Span::styled("^W", Style::default().fg(Color::Magenta)),
             Span::raw(" Close  "),
-            Span::styled("^H", Style::default().fg(Color::Magenta)),
-            Span::raw(" Left  "),
-            Span::styled("^L", Style::default().fg(Color::Magenta)),
-            Span::raw(" Right"),
+            Span::styled("Tab", Style::default().fg(Color::Magenta)),
+            Span::raw(" Cycle"),
         ]);
 
         frame.render_widget(hotkeys, area);
