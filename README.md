@@ -1,5 +1,5 @@
 # Shepard
-_Tend your flock_
+_Herd your flock_
 
 A terminal multiplexer for running lots of Claude Code 
 

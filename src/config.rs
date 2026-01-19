@@ -1,19 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MostRecentSession {
-    pub name: String,
-    pub path: PathBuf,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub claude_args: Vec<String>,
     pub workflows_path: PathBuf,
-    #[serde(default)]
-    pub recent_sessions: HashMap<PathBuf, MostRecentSession>,
 }
 
 impl Default for Config {
@@ -25,7 +16,6 @@ impl Default for Config {
         Self {
             claude_args: vec!["--dangerously-skip-permissions".to_string()],
             workflows_path,
-            recent_sessions: HashMap::new(),
         }
     }
 }
@@ -61,25 +51,5 @@ impl Config {
         let contents = serde_json::to_string_pretty(self)?;
         std::fs::write(&path, contents)?;
         Ok(())
-    }
-
-    pub fn set_recent_session(
-        &mut self,
-        startup_path: PathBuf,
-        session_name: String,
-        session_path: PathBuf,
-    ) -> anyhow::Result<()> {
-        self.recent_sessions.insert(
-            startup_path,
-            MostRecentSession {
-                name: session_name,
-                path: session_path,
-            },
-        );
-        self.save()
-    }
-
-    pub fn get_recent_session(&self, startup_path: &PathBuf) -> Option<&MostRecentSession> {
-        self.recent_sessions.get(startup_path)
     }
 }
