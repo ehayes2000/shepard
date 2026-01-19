@@ -1,10 +1,10 @@
 use arc_swap::ArcSwap;
+use crossbeam_channel::{Receiver, Sender, bounded};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use vt100::{Callbacks, Parser, Screen};
@@ -108,6 +108,32 @@ pub struct Session {
     writer: SharedWriter,
     _reader_thread: JoinHandle<()>,
     screen: Arc<ArcSwap<Screen>>,
+    /// Channel to signal the reader thread to shut down
+    shutdown_tx: Sender<()>,
+    /// Error message if the session died unexpectedly
+    session_error: Arc<ArcSwap<Option<String>>>,
+}
+
+impl Session {
+    /// Check if the session has died (reader thread encountered an error)
+    pub fn is_dead(&self) -> bool {
+        self.session_error.load().is_some()
+    }
+
+    /// Get the error message if the session died
+    pub fn get_error(&self) -> Option<String> {
+        self.session_error.load().as_ref().clone()
+    }
+
+    /// Signal the reader thread to shut down gracefully
+    pub fn shutdown(&self) {
+        let _ = self.shutdown_tx.try_send(());
+    }
+
+    /// Get the current screen state
+    pub fn get_screen(&self) -> Arc<Screen> {
+        self.screen.load_full()
+    }
 }
 
 pub struct DetachedSession(Session);
@@ -147,7 +173,7 @@ impl AttachedSession {
     pub fn new(
         command: &str,
         args: &[&str],
-        _tx: Sender<Screen>,
+        _tx: std::sync::mpsc::Sender<Screen>,
         size: SharedSize,
         cwd: Option<&Path>,
     ) -> anyhow::Result<Self> {
@@ -184,27 +210,56 @@ impl AttachedSession {
         ));
         let shared_screen = screen.clone();
 
+        // Create shutdown channel - bounded(0) means rendezvous channel
+        let (shutdown_tx, shutdown_rx): (Sender<()>, Receiver<()>) = bounded(1);
+
+        // Create error reporting channel
+        let session_error: Arc<ArcSwap<Option<String>>> = Arc::new(ArcSwap::from_pointee(None));
+        let shared_error = session_error.clone();
+
         let reader_thread = std::thread::spawn(move || {
             let master = pair.master;
             let callbacks = TerminalCallbacks::new(callback_writer);
             let mut parser = Parser::new_with_callbacks(rows, cols, SCROLLBACK, callbacks);
             let mut buf = [0u8; BUF_SIZE];
             loop {
+                // Check for shutdown signal (non-blocking)
+                if shutdown_rx.try_recv().is_ok() {
+                    break;
+                }
+
                 match reader.read(&mut buf) {
-                    Ok(0) => break, // EOF
+                    Ok(0) => break, // EOF - child process exited
                     Ok(n) => {
                         // Check if size changed and update both PTY and parser
                         let (rows, cols) = size.get();
-                        let current = master.get_size().expect("get pty size");
+
+                        // Handle PTY size query gracefully
+                        let current = match master.get_size() {
+                            Ok(size) => size,
+                            Err(e) => {
+                                shared_error.store(Arc::new(Some(format!(
+                                    "PTY error: failed to get size: {}",
+                                    e
+                                ))));
+                                break;
+                            }
+                        };
+
                         if current.rows != rows || current.cols != cols {
-                            master
-                                .resize(PtySize {
-                                    rows,
-                                    cols,
-                                    pixel_width: 0,
-                                    pixel_height: 0,
-                                })
-                                .expect("resize pty");
+                            // Handle PTY resize gracefully
+                            if let Err(e) = master.resize(PtySize {
+                                rows,
+                                cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            }) {
+                                shared_error.store(Arc::new(Some(format!(
+                                    "PTY error: failed to resize: {}",
+                                    e
+                                ))));
+                                break;
+                            }
                         }
                         parser.screen_mut().set_size(rows, cols);
                         parser.process(&buf[..n]);
@@ -215,7 +270,18 @@ impl AttachedSession {
                             continue;
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        // Read error - PTY closed or child died
+                        let kind = e.kind();
+                        // EIO is expected when child process exits
+                        if kind != std::io::ErrorKind::Other {
+                            shared_error.store(Arc::new(Some(format!(
+                                "PTY read error: {}",
+                                e
+                            ))));
+                        }
+                        break;
+                    }
                 }
             }
         });
@@ -225,6 +291,8 @@ impl AttachedSession {
             writer,
             _reader_thread: reader_thread,
             screen,
+            shutdown_tx,
+            session_error,
         }))
     }
 
@@ -241,9 +309,5 @@ impl AttachedSession {
         writer.write_all(data)?;
         writer.flush()?;
         Ok(())
-    }
-
-    pub fn get_screen(&self) -> Arc<Screen> {
-        self.screen.load_full()
     }
 }

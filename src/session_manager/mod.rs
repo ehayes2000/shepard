@@ -1,7 +1,7 @@
 mod session_pair;
 mod ui;
 
-pub use ui::{StatusLevel, StatusMessage};
+pub use ui::StatusMessage;
 use ui::{CreateDialog, HelpPopup, MainView, SessionSelector, StatusBar};
 
 use crossterm::ExecutableCommand;
@@ -128,10 +128,6 @@ impl TuiSessionManager {
         })
     }
 
-    pub fn status_sender(&self) -> Sender<StatusMessage> {
-        self.status_tx.clone()
-    }
-
     fn create_session(
         &self,
         command: &str,
@@ -216,6 +212,9 @@ impl TuiSessionManager {
 
     pub fn run(&mut self) -> anyhow::Result<()> {
         loop {
+            // Check for dead sessions before rendering
+            self.check_dead_sessions();
+
             let inner_size = self.render_frame()?;
             self.size.set(inner_size.height, inner_size.width);
 
@@ -239,6 +238,58 @@ impl TuiSessionManager {
         }
 
         Ok(())
+    }
+
+    /// Check if the active session has died and handle cleanup
+    fn check_dead_sessions(&mut self) {
+        let should_remove = if let Some(ref pair) = self.active {
+            // Check if the currently viewed session is dead
+            let viewed_dead = match pair.view {
+                SessionView::Claude => pair.claude.is_dead(),
+                SessionView::Shell => pair.shell.as_ref().map(|s| s.is_dead()).unwrap_or(false),
+            };
+
+            if viewed_dead {
+                // Get error message from the dead session
+                let error = match pair.view {
+                    SessionView::Claude => pair.claude.get_error(),
+                    SessionView::Shell => pair.shell.as_ref().and_then(|s| s.get_error()),
+                };
+
+                let session_name = pair.name.clone();
+                let view_name = match pair.view {
+                    SessionView::Claude => "claude",
+                    SessionView::Shell => "shell",
+                };
+
+                let log_msg = error.unwrap_or_else(|| "Process exited".to_string());
+                let _ = self.status_tx.send(StatusMessage::err(
+                    format!("Session {} ({}) died", session_name, view_name),
+                    log_msg,
+                ));
+
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if should_remove {
+            // Shutdown and remove the active session
+            if let Some(pair) = self.active.take() {
+                pair.claude.shutdown();
+                if let Some(ref shell) = pair.shell {
+                    shell.shutdown();
+                }
+            }
+
+            // Close any popups and return to normal mode
+            if self.mode == UiMode::ListSessions {
+                self.mode = UiMode::Normal;
+            }
+        }
     }
 
     /// Handle global hotkeys. Returns true if a hotkey was processed.
@@ -354,13 +405,33 @@ impl TuiSessionManager {
 
     fn handle_normal_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         if let Some(ref mut pair) = self.active {
-            match pair.view {
-                SessionView::Claude => pair.claude.write_input(bytes)?,
+            // Check if session is dead before trying to write
+            let is_dead = match pair.view {
+                SessionView::Claude => pair.claude.is_dead(),
+                SessionView::Shell => pair.shell.as_ref().map(|s| s.is_dead()).unwrap_or(true),
+            };
+
+            if is_dead {
+                // Session is dead, don't try to write - check_dead_sessions will clean up
+                return Ok(());
+            }
+
+            // Try to write, but don't crash if it fails
+            let write_result = match pair.view {
+                SessionView::Claude => pair.claude.write_input(bytes),
                 SessionView::Shell => {
                     if let Some(ref mut shell) = pair.shell {
-                        shell.write_input(bytes)?;
+                        shell.write_input(bytes)
+                    } else {
+                        Ok(())
                     }
                 }
+            };
+
+            // If write failed, the session probably just died - ignore the error
+            // check_dead_sessions will handle cleanup on next iteration
+            if let Err(_) = write_result {
+                return Ok(());
             }
         }
         Ok(())
@@ -555,33 +626,6 @@ impl TuiSessionManager {
             _ => {}
         }
 
-        Ok(())
-    }
-
-    /// Switch to a session by its index in the combined list (active + background).
-    /// Index 0 is the active session if one exists.
-    fn switch_to_session(&mut self, index: usize) -> anyhow::Result<()> {
-        let has_active = self.active.is_some();
-
-        if has_active && index == 0 {
-            // Already on active session, nothing to do
-            return Ok(());
-        }
-
-        // Adjust index to account for active session at position 0
-        let bg_index = if has_active { index - 1 } else { index };
-
-        if bg_index >= self.background.len() {
-            return Ok(());
-        }
-
-        let bg_pair = self.background.remove(bg_index);
-
-        if let Some(old_pair) = self.active.take() {
-            self.background.push(old_pair.detach());
-        }
-
-        self.active = Some(bg_pair.attach()?);
         Ok(())
     }
 }

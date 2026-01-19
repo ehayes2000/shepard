@@ -15,6 +15,7 @@ pub struct SessionMetadata {
 /// A workflow defines how sessions are created and configured
 pub trait Workflow: Send + Sync {
     /// Name of this workflow for error messages
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
 
     /// Called before a session is created. Returns metadata for the session.

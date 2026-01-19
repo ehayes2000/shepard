@@ -42,11 +42,6 @@ impl SessionSelector {
         self.active_index = index;
     }
 
-    /// Get the current query string.
-    pub fn query(&self) -> &str {
-        &self.query
-    }
-
     /// Add a character to the query and update the filter.
     pub fn push_char(&mut self, c: char) {
         self.query.push(c);

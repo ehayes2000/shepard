@@ -102,13 +102,17 @@ impl Workflow for WorktreeWorkflow {
         }
 
         // Create the worktree with a new branch based on origin/main
+        let worktree_path_str = worktree_path
+            .to_str()
+            .ok_or_else(|| Self::error("worktree path contains invalid UTF-8"))?;
+
         let output = Command::new("git")
             .args([
                 "worktree",
                 "add",
                 "-b",
                 session_name,
-                worktree_path.to_str().unwrap(),
+                worktree_path_str,
                 &format!("origin/{}", main_branch),
             ])
             .output()
