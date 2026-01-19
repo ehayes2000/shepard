@@ -61,9 +61,9 @@ impl SessionPicker {
             .collect();
 
         let title = if has_overflow {
-            " Select Session (...) "
+            " List Sessions (...) "
         } else {
-            " Select Session "
+            " List Sessions "
         };
 
         let list = List::new(items)
@@ -71,6 +71,7 @@ impl SessionPicker {
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Magenta))
                     .style(Style::default().bg(Color::Black)),
             )
             .highlight_style(

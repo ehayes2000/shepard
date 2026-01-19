@@ -9,9 +9,9 @@ use session_manager::TuiSessionManager;
 fn main() -> anyhow::Result<()> {
     let mut manager = TuiSessionManager::new()?;
 
-    // Try to resume a previous session, otherwise open command menu
+    // Try to resume a previous session, otherwise open new session dialog
     if !manager.try_resume()? {
-        manager.open_command_menu();
+        manager.open_new_session();
     }
 
     manager.run()?;

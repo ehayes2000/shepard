@@ -2,7 +2,7 @@ mod session_pair;
 mod ui;
 
 pub use ui::{StatusLevel, StatusMessage};
-use ui::{CommandMenu, CreateDialog, MainView, SessionPicker, StatusBar};
+use ui::{CreateDialog, HelpPopup, MainView, SessionPicker, StatusBar};
 
 use crossterm::ExecutableCommand;
 use crossterm::terminal::{
@@ -23,24 +23,22 @@ use std::sync::mpsc::Sender;
 use session_pair::{ActivePair, BackgroundPair, SessionView};
 
 const BUF_SIZE: usize = 1024;
-const CTRL_K: u8 = 0x0B;
+const CTRL_H: u8 = 0x08;
 const CTRL_T: u8 = 0x14;
+const CTRL_N: u8 = 0x0E;
+const CTRL_L: u8 = 0x0C;
 
-fn is_menu_hotkey(bytes: &[u8]) -> bool {
-    bytes.len() == 1 && bytes[0] == CTRL_K
-}
-
-fn is_shell_hotkey(bytes: &[u8]) -> bool {
-    bytes.len() == 1 && bytes[0] == CTRL_T
+fn is_hotkey(bytes: &[u8], key: u8) -> bool {
+    bytes.len() == 1 && bytes[0] == key
 }
 
 #[derive(Default, Clone, PartialEq)]
 enum UiMode {
     #[default]
     Normal,
-    CommandMenu,
-    SelectMode,
-    CreateMode,
+    HelpPopup,
+    ListSessions,
+    NewSession,
 }
 
 pub struct TuiSessionManager {
@@ -56,7 +54,7 @@ pub struct TuiSessionManager {
     startup_path: PathBuf,
     // UI components
     main_view: MainView,
-    command_menu: CommandMenu,
+    help_popup: HelpPopup,
     session_picker: SessionPicker,
     create_dialog: CreateDialog,
     status_bar: StatusBar,
@@ -110,7 +108,7 @@ impl TuiSessionManager {
             config,
             startup_path,
             main_view: MainView::new(),
-            command_menu: CommandMenu::new(),
+            help_popup: HelpPopup::new(),
             session_picker: SessionPicker::new(),
             create_dialog: CreateDialog::new(),
             status_bar,
@@ -161,7 +159,7 @@ impl TuiSessionManager {
             Ok(m) => m,
             Err(status_msg) => {
                 let _ = self.status_tx.send(status_msg);
-                self.mode = UiMode::CommandMenu;
+                self.mode = UiMode::NewSession;
                 return Ok(());
             }
         };
@@ -199,8 +197,9 @@ impl TuiSessionManager {
         Ok(true)
     }
 
-    pub fn open_command_menu(&mut self) {
-        self.mode = UiMode::CommandMenu;
+    pub fn open_new_session(&mut self) {
+        self.create_dialog.clear();
+        self.mode = UiMode::NewSession;
     }
 
     pub fn run(&mut self) -> anyhow::Result<()> {
@@ -214,9 +213,9 @@ impl TuiSessionManager {
             {
                 Ok(bytes) => match self.mode {
                     UiMode::Normal => self.handle_normal_input(&bytes)?,
-                    UiMode::CommandMenu => self.handle_command_menu_input(&bytes)?,
-                    UiMode::SelectMode => self.handle_select_input(&bytes)?,
-                    UiMode::CreateMode => self.handle_create_input(&bytes)?,
+                    UiMode::HelpPopup => self.handle_help_input(&bytes)?,
+                    UiMode::ListSessions => self.handle_list_input(&bytes)?,
+                    UiMode::NewSession => self.handle_new_session_input(&bytes)?,
                 },
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -274,13 +273,13 @@ impl TuiSessionManager {
             // Render overlays based on mode
             match mode {
                 UiMode::Normal => {}
-                UiMode::CommandMenu => {
-                    self.command_menu.render(frame, area);
+                UiMode::HelpPopup => {
+                    self.help_popup.render(frame, area);
                 }
-                UiMode::SelectMode => {
+                UiMode::ListSessions => {
                     self.session_picker.render(frame, area, &session_names);
                 }
-                UiMode::CreateMode => {
+                UiMode::NewSession => {
                     self.create_dialog.render(frame, area);
                 }
             }
@@ -290,10 +289,18 @@ impl TuiSessionManager {
     }
 
     fn handle_normal_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-        if is_menu_hotkey(bytes) {
-            self.mode = UiMode::CommandMenu;
-        } else if is_shell_hotkey(bytes) {
+        if is_hotkey(bytes, CTRL_H) {
+            self.mode = UiMode::HelpPopup;
+        } else if is_hotkey(bytes, CTRL_T) {
             self.toggle_shell()?;
+        } else if is_hotkey(bytes, CTRL_N) {
+            self.create_dialog.clear();
+            self.mode = UiMode::NewSession;
+        } else if is_hotkey(bytes, CTRL_L) {
+            if !self.background.is_empty() {
+                self.session_picker.select(Some(0));
+                self.mode = UiMode::ListSessions;
+            }
         } else if let Some(ref mut pair) = self.active {
             match pair.view {
                 SessionView::Claude => pair.claude.write_input(bytes)?,
@@ -335,37 +342,35 @@ impl TuiSessionManager {
         Ok(())
     }
 
-    fn handle_command_menu_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+    fn handle_help_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
 
-        if bytes[0] == 0x1b || is_menu_hotkey(bytes) {
+        // Hotkeys work from help popup and close it
+        if is_hotkey(bytes, CTRL_H) {
             self.mode = UiMode::Normal;
-            return Ok(());
-        }
-
-        match bytes[0] {
-            b'c' | b'C' => {
-                self.create_dialog.clear();
-                self.mode = UiMode::CreateMode;
-            }
-            b's' | b'S' => {
-                if !self.background.is_empty() {
-                    self.session_picker.select(Some(0));
-                    self.mode = UiMode::SelectMode;
-                }
-            }
-            b'q' | b'Q' => {
+        } else if is_hotkey(bytes, CTRL_T) {
+            self.mode = UiMode::Normal;
+            self.toggle_shell()?;
+        } else if is_hotkey(bytes, CTRL_N) {
+            self.create_dialog.clear();
+            self.mode = UiMode::NewSession;
+        } else if is_hotkey(bytes, CTRL_L) {
+            if !self.background.is_empty() {
+                self.session_picker.select(Some(0));
+                self.mode = UiMode::ListSessions;
+            } else {
                 self.mode = UiMode::Normal;
             }
-            _ => {}
+        } else {
+            // Any other key just closes help
+            self.mode = UiMode::Normal;
         }
-
         Ok(())
     }
 
-    fn handle_select_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+    fn handle_list_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
@@ -387,11 +392,6 @@ impl TuiSessionManager {
             return Ok(());
         }
 
-        if is_menu_hotkey(bytes) {
-            self.mode = UiMode::CommandMenu;
-            return Ok(());
-        }
-
         match bytes[0] {
             b'\r' | b'\n' => {
                 if let Some(selected) = self.session_picker.selected() {
@@ -408,7 +408,7 @@ impl TuiSessionManager {
         Ok(())
     }
 
-    fn handle_create_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+    fn handle_new_session_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
@@ -416,12 +416,6 @@ impl TuiSessionManager {
         if bytes[0] == 0x1b && bytes.len() == 1 {
             self.create_dialog.clear();
             self.mode = UiMode::Normal;
-            return Ok(());
-        }
-
-        if is_menu_hotkey(bytes) {
-            self.create_dialog.clear();
-            self.mode = UiMode::CommandMenu;
             return Ok(());
         }
 
@@ -437,7 +431,7 @@ impl TuiSessionManager {
                 self.new_named_claude_session(&name)?;
                 self.mode = UiMode::Normal;
             }
-            0x7f | 0x08 => {
+            0x7f => {
                 self.create_dialog.pop();
             }
             b if b.is_ascii_graphic() || b == b' ' => {

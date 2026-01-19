@@ -44,8 +44,9 @@ impl CreateDialog {
         frame.render_widget(Clear, popup_area);
 
         let block = Block::default()
-            .title(" Create Session ")
+            .title(" New Session ")
             .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta))
             .style(Style::default().bg(Color::Black));
 
         let inner = block.inner(popup_area);

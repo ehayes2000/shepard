@@ -85,19 +85,12 @@ impl StatusBar {
         Line::from(vec![
             Span::raw(" "),
             Span::styled(
-                "ctrl+k",
+                "ctrl+h",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" "),
-            Span::styled(
-                "ctrl+t",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
+            Span::raw(" help "),
         ])
     }
 
