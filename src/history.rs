@@ -7,13 +7,14 @@ const MAX_RECENT_PER_WORKSPACE: usize = 5;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecentSession {
     pub name: String,
-    pub path: PathBuf,
+    /// The original project path (git repo root) where the session was created from
+    pub project_path: PathBuf,
 }
 
-/// Stores recent sessions per startup directory (workspace).
+/// Stores recent sessions per repository name.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionHistory {
-    recent_sessions: HashMap<PathBuf, VecDeque<RecentSession>>,
+    recent_sessions: HashMap<String, VecDeque<RecentSession>>,
 }
 
 impl SessionHistory {
@@ -49,16 +50,16 @@ impl SessionHistory {
 
     pub fn set_recent_session(
         &mut self,
-        startup_path: PathBuf,
+        repo_name: String,
         session_name: String,
-        session_path: PathBuf,
+        project_path: PathBuf,
     ) -> anyhow::Result<()> {
         let entry = RecentSession {
             name: session_name,
-            path: session_path,
+            project_path,
         };
 
-        let sessions = self.recent_sessions.entry(startup_path).or_default();
+        let sessions = self.recent_sessions.entry(repo_name).or_default();
 
         // Remove existing entry if present (will be re-added at front)
         sessions.retain(|s| s != &entry);
@@ -74,28 +75,25 @@ impl SessionHistory {
         self.save()
     }
 
-    /// Get the most recent session for a workspace
-    pub fn get_recent_session(&self, startup_path: &PathBuf) -> Option<&RecentSession> {
+    /// Get the most recent session for a repository
+    pub fn get_recent_session(&self, repo_name: &str) -> Option<&RecentSession> {
         self.recent_sessions
-            .get(startup_path)
+            .get(repo_name)
             .and_then(|sessions| sessions.front())
     }
 
-    /// Get all recent sessions for a workspace (most recent first)
-    pub fn get_recent_sessions(
-        &self,
-        startup_path: &PathBuf,
-    ) -> impl Iterator<Item = &RecentSession> {
+    /// Get all recent sessions for a repository (most recent first)
+    pub fn get_recent_sessions(&self, repo_name: &str) -> impl Iterator<Item = &RecentSession> {
         self.recent_sessions
-            .get(startup_path)
+            .get(repo_name)
             .into_iter()
             .flat_map(|sessions| sessions.iter())
     }
 
-    /// Remove all sessions with the given path from all workspaces
-    pub fn remove_by_path(&mut self, path: &std::path::Path) {
-        for sessions in self.recent_sessions.values_mut() {
-            sessions.retain(|s| s.path != path);
+    /// Remove a session by name from a specific repository
+    pub fn remove_by_name(&mut self, repo_name: &str, session_name: &str) {
+        if let Some(sessions) = self.recent_sessions.get_mut(repo_name) {
+            sessions.retain(|s| s.name != session_name);
         }
     }
 }
