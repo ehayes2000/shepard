@@ -7,6 +7,7 @@ use ui::{CreateDialog, HelpPopup, KillConfirmDialog, MainView, SelectorItemKind,
 use std::collections::HashMap;
 
 use crossterm::ExecutableCommand;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -104,6 +105,7 @@ impl TuiSessionManager {
     pub fn new() -> anyhow::Result<Self> {
         enable_raw_mode()?;
         stdout().execute(EnterAlternateScreen)?;
+        stdout().execute(EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout());
         let terminal = Terminal::new(backend)?;
 
@@ -469,16 +471,16 @@ impl TuiSessionManager {
         // Update status bar (check for new messages, clear expired)
         self.status_bar.update();
 
-        let (screen, active_view) = match &self.active {
+        let (screen, active_view, scroll_offset) = match &self.active {
             Some(pair) => {
                 let screen = match pair.view {
                     SessionView::Claude => Some(pair.claude.get_screen()),
                     // For shell view, we'll render the multiplexer instead
                     SessionView::Shell => None,
                 };
-                (screen, pair.view)
+                (screen, pair.view, pair.scroll_offset)
             }
-            None => (None, SessionView::Claude),
+            None => (None, SessionView::Claude, 0),
         };
         let active_name = self.active.as_ref().map(|p| p.name.clone());
         let active_path = self.active.as_ref().map(|p| p.path.clone());
@@ -511,6 +513,7 @@ impl TuiSessionManager {
                 background_count,
                 bottom_left,
                 bottom_center,
+                scroll_offset,
             );
 
             // If in shell view, render the multiplexer inside the frame
@@ -545,6 +548,93 @@ impl TuiSessionManager {
         Ok(inner_area)
     }
 
+    /// Check if bytes contain mouse events (SGR or legacy format).
+    /// Returns true if the bytes are entirely mouse events that should not be forwarded to PTY.
+    fn is_mouse_event(bytes: &[u8]) -> bool {
+        // Check if all content is mouse events (may be multiple concatenated)
+        let mut pos = 0;
+        while pos < bytes.len() {
+            // SGR mouse mode: ESC [ < ... M or ESC [ < ... m
+            if bytes[pos..].starts_with(b"\x1b[<") {
+                // Find the terminating M or m
+                if let Some(end) = bytes[pos..].iter().position(|&b| b == b'M' || b == b'm') {
+                    pos += end + 1;
+                    continue;
+                }
+            }
+
+            // Legacy mouse mode: ESC [ M followed by 3 bytes
+            if bytes[pos..].len() >= 6 && bytes[pos..].starts_with(b"\x1b[M") {
+                pos += 6;
+                continue;
+            }
+
+            // Not a mouse event
+            return false;
+        }
+
+        // All bytes were mouse events
+        pos > 0
+    }
+
+    /// Parse mouse scroll events from escape sequences.
+    /// Returns Some(lines) where positive = scroll up, negative = scroll down.
+    /// Handles multiple concatenated events and sums up scroll deltas.
+    /// Returns None if no scroll events found.
+    fn parse_scroll_event(bytes: &[u8]) -> Option<i32> {
+        let mut total_delta = 0i32;
+        let mut pos = 0;
+
+        while pos < bytes.len() {
+            // SGR mouse mode: ESC [ < Ps ; Px ; Py M (or m for release)
+            if bytes[pos..].starts_with(b"\x1b[<") {
+                // Find the end of this event (M or m)
+                if let Some(end_offset) = bytes[pos..].iter().position(|&b| b == b'M' || b == b'm') {
+                    let event = &bytes[pos..pos + end_offset + 1];
+
+                    // Parse the button code (between '<' and first ';')
+                    if let Some(semi_pos) = event[3..].iter().position(|&b| b == b';')
+                        && let Ok(button_str) = std::str::from_utf8(&event[3..3 + semi_pos])
+                        && let Ok(button) = button_str.parse::<u8>()
+                    {
+                        // Button 64 = scroll up, 65 = scroll down
+                        let base_button = button & 0b11000011;
+                        match base_button {
+                            64 => total_delta += 1,  // scroll up
+                            65 => total_delta -= 1,  // scroll down
+                            _ => {}
+                        }
+                    }
+
+                    pos += end_offset + 1;
+                    continue;
+                }
+            }
+
+            // Legacy mouse mode: ESC [ M Cb Cx Cy
+            if bytes[pos..].len() >= 6 && bytes[pos..].starts_with(b"\x1b[M") {
+                let button = bytes[pos + 3];
+                let base_button = button & 0b11000011;
+                match base_button {
+                    96 => total_delta += 1,   // scroll up
+                    97 => total_delta -= 1,   // scroll down
+                    _ => {}
+                }
+                pos += 6;
+                continue;
+            }
+
+            // Not a recognized event at this position
+            break;
+        }
+
+        if total_delta != 0 {
+            Some(total_delta)
+        } else {
+            None
+        }
+    }
+
     fn handle_normal_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         let Some(ref pair) = self.active else {
             return Ok(());
@@ -553,12 +643,42 @@ impl TuiSessionManager {
         let name = pair.name.clone();
         let view = pair.view;
 
+        // Handle scroll events - adjust scroll offset instead of forwarding to PTY
+        if let Some(scroll_delta) = Self::parse_scroll_event(bytes) {
+            if let Some(ref mut pair) = self.active {
+                // vt100 will clamp the scrollback position to the actual scrollback buffer size
+                // The max is SCROLLBACK (100) lines from session.rs
+                const MAX_SCROLLBACK: usize = 100;
+
+                if scroll_delta > 0 {
+                    // Scroll up (show older content)
+                    pair.scroll_offset = (pair.scroll_offset + scroll_delta as usize)
+                        .min(MAX_SCROLLBACK);
+                } else {
+                    // Scroll down (show newer content)
+                    let abs_delta = (-scroll_delta) as usize;
+                    pair.scroll_offset = pair.scroll_offset.saturating_sub(abs_delta);
+                }
+            }
+            return Ok(());
+        }
+
+        // Filter out all other mouse events (clicks, motion, etc.) - don't forward to PTY
+        if Self::is_mouse_event(bytes) {
+            return Ok(());
+        }
+
         // Escape key - switch from shell back to Claude view
         if bytes == [0x1b] && view == SessionView::Shell {
             if let Some(ref mut pair) = self.active {
                 pair.view = SessionView::Claude;
             }
             return Ok(());
+        }
+
+        // Any other input resets scroll to bottom
+        if let Some(ref mut pair) = self.active {
+            pair.scroll_offset = 0;
         }
 
         match view {
@@ -1102,6 +1222,7 @@ impl TuiSessionManager {
 
 impl Drop for TuiSessionManager {
     fn drop(&mut self) {
+        let _ = stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
     }

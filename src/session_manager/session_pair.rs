@@ -19,6 +19,8 @@ pub struct ActivePair {
     pub claude: AttachedSession,
     /// Whether this session was started via resume (--continue flag)
     pub resumed: bool,
+    /// Scroll offset for viewing scrollback history (0 = at bottom, showing current output)
+    pub scroll_offset: usize,
 }
 
 impl ActivePair {
@@ -34,6 +36,7 @@ impl ActivePair {
             view: SessionView::Claude,
             claude,
             resumed,
+            scroll_offset: 0,
         }
     }
 
@@ -44,6 +47,7 @@ impl ActivePair {
             last_view: self.view,
             claude: self.claude.detach(),
             resumed: self.resumed,
+            scroll_offset: self.scroll_offset,
         }
     }
 }
@@ -57,6 +61,8 @@ pub struct BackgroundPair {
     pub claude: DetachedSession,
     /// Whether this session was started via resume (--continue flag)
     pub resumed: bool,
+    /// Scroll offset for viewing scrollback history (0 = at bottom, showing current output)
+    pub scroll_offset: usize,
 }
 
 impl BackgroundPair {
@@ -67,6 +73,7 @@ impl BackgroundPair {
             view: self.last_view,
             claude: self.claude.attach()?,
             resumed: self.resumed,
+            scroll_offset: self.scroll_offset,
         })
     }
 }

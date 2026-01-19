@@ -10,28 +10,51 @@ use vt100::Screen;
 pub struct PtyWidget<'a> {
     screen: &'a Screen,
     dimmed: bool,
+    scroll_offset: usize,
 }
 
 impl<'a> PtyWidget<'a> {
     pub fn new(screen: &'a Screen) -> Self {
-        Self { screen, dimmed: false }
+        Self { screen, dimmed: false, scroll_offset: 0 }
     }
 
     pub fn dimmed(mut self, dimmed: bool) -> Self {
         self.dimmed = dimmed;
         self
     }
+
+    pub fn scroll_offset(mut self, offset: usize) -> Self {
+        self.scroll_offset = offset;
+        self
+    }
 }
 
 impl Widget for PtyWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Render within bounds - use minimum of screen size and area size
         let (screen_rows, screen_cols) = self.screen.size();
-        let rows = area.height.min(screen_rows);
+        let display_rows = area.height.min(screen_rows);
         let cols = area.width.min(screen_cols);
-        for row in 0..rows {
+
+        if self.scroll_offset == 0 {
+            // No scrollback - render current screen directly
+            self.render_screen(self.screen, area, buf, display_rows, cols);
+        } else {
+            // Scrollback mode - clone screen and set scrollback position
+            // vt100's set_scrollback(n) shows the view starting n rows from the top of scrollback
+            // We want scroll_offset to mean "how many lines up from bottom"
+            // So we need to convert: scrollback_position = scroll_offset
+            let mut scrolled_screen = self.screen.clone();
+            scrolled_screen.set_scrollback(self.scroll_offset);
+            self.render_screen(&scrolled_screen, area, buf, display_rows, cols);
+        }
+    }
+}
+
+impl PtyWidget<'_> {
+    fn render_screen(&self, screen: &Screen, area: Rect, buf: &mut Buffer, display_rows: u16, cols: u16) {
+        for row in 0..display_rows {
             for col in 0..cols {
-                if let Some(cell) = self.screen.cell(row, col) {
+                if let Some(cell) = screen.cell(row, col) {
                     let mut style = vt100_to_ratatui_style(cell);
                     if self.dimmed {
                         style = style.add_modifier(Modifier::DIM);
