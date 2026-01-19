@@ -85,8 +85,7 @@ impl MainView {
         frame.render_widget(block, area);
 
         if let Some(screen) = screen {
-            let mut display_screen = (**screen).clone();
-            let widget = PtyWidget::new(&mut display_screen);
+            let widget = PtyWidget::new(screen.as_ref());
             frame.render_widget(widget, inner);
         }
 

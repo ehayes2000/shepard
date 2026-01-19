@@ -1,6 +1,6 @@
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender, bounded};
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use vt100::{Callbacks, Parser, Screen};
+
+/// Type alias for parser with terminal callbacks
+type CallbackParser = Parser<TerminalCallbacks>;
 
 /// Shared writer for sending responses back to the PTY
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -75,7 +78,7 @@ impl Callbacks for TerminalCallbacks {
     }
 }
 
-const SCROLLBACK: usize = 500;
+const SCROLLBACK: usize = 100;
 const BUF_SIZE: usize = 8 * 1024;
 
 /// (rows, cols) ordered size stored in AtomicU32
@@ -107,11 +110,18 @@ pub struct Session {
     active: Arc<AtomicBool>,
     writer: SharedWriter,
     _reader_thread: JoinHandle<()>,
-    screen: Arc<ArcSwap<Screen>>,
+    /// Shared parser - owned by reader thread but accessible for on-demand screen cloning
+    parser: Arc<Mutex<CallbackParser>>,
+    /// Cached screen clone for rendering (only updated when dirty)
+    cached_screen: ArcSwap<Screen>,
+    /// Dirty flag - set by reader thread, cleared when screen is cloned
+    dirty: Arc<AtomicBool>,
     /// Channel to signal the reader thread to shut down
     shutdown_tx: Sender<()>,
     /// Error message if the session died unexpectedly
     session_error: Arc<ArcSwap<Option<String>>>,
+    /// Child process handle for killing
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
 }
 
 impl Session {
@@ -125,14 +135,23 @@ impl Session {
         self.session_error.load().as_ref().clone()
     }
 
-    /// Signal the reader thread to shut down gracefully
+    /// Signal the reader thread to shut down gracefully and kill the child process
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.try_send(());
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
     }
 
-    /// Get the current screen state
+    /// Get the current screen state (clones only if dirty)
     pub fn get_screen(&self) -> Arc<Screen> {
-        self.screen.load_full()
+        // Only clone the screen if it's been modified since last read
+        if self.dirty.swap(false, Ordering::AcqRel) {
+            if let Ok(parser) = self.parser.lock() {
+                self.cached_screen.store(Arc::new(parser.screen().clone()));
+            }
+        }
+        self.cached_screen.load_full()
     }
 }
 
@@ -195,8 +214,9 @@ impl AttachedSession {
             cmd.cwd(dir);
         }
 
-        let _ = pair.slave.spawn_command(cmd)?;
+        let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
+        let child = Arc::new(Mutex::new(child));
 
         let mut reader = pair.master.try_clone_reader()?;
         let writer: SharedWriter = Arc::new(Mutex::new(pair.master.take_writer()?));
@@ -205,12 +225,25 @@ impl AttachedSession {
         let active = Arc::new(AtomicBool::new(true));
         let shared_active = active.clone();
 
-        let screen = Arc::new(ArcSwap::from_pointee(
-            Parser::new(rows, cols, SCROLLBACK).screen().clone(),
-        ));
-        let shared_screen = screen.clone();
+        // Create parser with callbacks - shared between reader thread and main thread
+        let callbacks = TerminalCallbacks::new(callback_writer);
+        let parser = Arc::new(Mutex::new(Parser::new_with_callbacks(
+            rows,
+            cols,
+            SCROLLBACK,
+            callbacks,
+        )));
+        let shared_parser = parser.clone();
 
-        // Create shutdown channel - bounded(0) means rendezvous channel
+        // Create initial cached screen
+        let initial_screen = parser.lock().unwrap().screen().clone();
+        let cached_screen = ArcSwap::from_pointee(initial_screen);
+
+        // Dirty flag - starts false since cached_screen is in sync
+        let dirty = Arc::new(AtomicBool::new(false));
+        let shared_dirty = dirty.clone();
+
+        // Create shutdown channel - bounded(1) for non-blocking send
         let (shutdown_tx, shutdown_rx): (Sender<()>, Receiver<()>) = bounded(1);
 
         // Create error reporting channel
@@ -219,8 +252,6 @@ impl AttachedSession {
 
         let reader_thread = std::thread::spawn(move || {
             let master = pair.master;
-            let callbacks = TerminalCallbacks::new(callback_writer);
-            let mut parser = Parser::new_with_callbacks(rows, cols, SCROLLBACK, callbacks);
             let mut buf = [0u8; BUF_SIZE];
             loop {
                 // Check for shutdown signal (non-blocking)
@@ -265,10 +296,15 @@ impl AttachedSession {
                                 break;
                             }
                         }
-                        parser.screen_mut().set_size(rows, cols);
-                        parser.process(&buf[..n]);
-                        // Always update the shared screen state
-                        shared_screen.store(Arc::new(parser.screen().clone()));
+
+                        // Lock parser, process data, set dirty flag
+                        // No screen cloning here - that happens on-demand in get_screen()
+                        if let Ok(mut parser) = shared_parser.lock() {
+                            parser.screen_mut().set_size(rows, cols);
+                            parser.process(&buf[..n]);
+                        }
+                        shared_dirty.store(true, Ordering::Release);
+
                         let is_active = shared_active.load(Ordering::Acquire);
                         if !is_active {
                             continue;
@@ -297,9 +333,12 @@ impl AttachedSession {
             active,
             writer,
             _reader_thread: reader_thread,
-            screen,
+            parser,
+            cached_screen,
+            dirty,
             shutdown_tx,
             session_error,
+            child,
         }))
     }
 

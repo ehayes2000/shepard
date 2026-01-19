@@ -8,12 +8,12 @@ use vt100::Screen;
 
 /// A widget that renders a vt100 terminal screen
 pub struct PtyWidget<'a> {
-    screen: &'a mut Screen,
+    screen: &'a Screen,
     dimmed: bool,
 }
 
 impl<'a> PtyWidget<'a> {
-    pub fn new(screen: &'a mut Screen) -> Self {
+    pub fn new(screen: &'a Screen) -> Self {
         Self { screen, dimmed: false }
     }
 
@@ -25,9 +25,12 @@ impl<'a> PtyWidget<'a> {
 
 impl Widget for PtyWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        self.screen.set_size(area.height, area.width);
-        for row in 0..area.height {
-            for col in 0..area.width {
+        // Render within bounds - use minimum of screen size and area size
+        let (screen_rows, screen_cols) = self.screen.size();
+        let rows = area.height.min(screen_rows);
+        let cols = area.width.min(screen_cols);
+        for row in 0..rows {
+            for col in 0..cols {
                 if let Some(cell) = self.screen.cell(row, col) {
                     let mut style = vt100_to_ratatui_style(cell);
                     if self.dimmed {

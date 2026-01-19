@@ -132,10 +132,9 @@ impl TerminalMultiplexer {
         if self.panes.len() == 1 {
             let pane = &self.panes[0];
             let screen = pane.get_screen();
-            let mut display_screen = (*screen).clone();
-            let (cursor_row, cursor_col) = display_screen.cursor_position();
+            let (cursor_row, cursor_col) = screen.cursor_position();
 
-            let widget = PtyWidget::new(&mut display_screen);
+            let widget = PtyWidget::new(&screen);
             frame.render_widget(widget, area);
 
             let cursor_x = area.x + cursor_col;
@@ -173,12 +172,9 @@ impl TerminalMultiplexer {
 
             // Render the terminal content
             let screen = pane.get_screen();
-            let mut display_screen = (*screen).clone();
+            let (cursor_row, cursor_col) = screen.cursor_position();
 
-            // Get cursor position before rendering (and potentially resizing)
-            let (cursor_row, cursor_col) = display_screen.cursor_position();
-
-            let widget = PtyWidget::new(&mut display_screen).dimmed(!is_active);
+            let widget = PtyWidget::new(&screen).dimmed(!is_active);
             frame.render_widget(widget, pane_area);
 
             // Position the cursor in the active pane
