@@ -2,7 +2,7 @@ mod session_pair;
 mod ui;
 
 pub use ui::{StatusLevel, StatusMessage};
-use ui::{CreateDialog, HelpPopup, MainView, SessionPicker, StatusBar};
+use ui::{CreateDialog, HelpPopup, MainView, SessionSelector, StatusBar};
 
 use crossterm::ExecutableCommand;
 use crossterm::terminal::{
@@ -55,7 +55,7 @@ pub struct TuiSessionManager {
     // UI components
     main_view: MainView,
     help_popup: HelpPopup,
-    session_picker: SessionPicker,
+    session_selector: SessionSelector,
     create_dialog: CreateDialog,
     status_bar: StatusBar,
     status_tx: Sender<StatusMessage>,
@@ -109,7 +109,7 @@ impl TuiSessionManager {
             startup_path,
             main_view: MainView::new(),
             help_popup: HelpPopup::new(),
-            session_picker: SessionPicker::new(),
+            session_selector: SessionSelector::new(),
             create_dialog: CreateDialog::new(),
             status_bar,
             status_tx,
@@ -245,9 +245,20 @@ impl TuiSessionManager {
         };
         let active_name = self.active.as_ref().map(|p| p.name.clone());
         let active_path = self.active.as_ref().map(|p| p.path.clone());
-        let session_names: Vec<String> = self.background.iter().map(|p| p.name.clone()).collect();
         let background_count = self.background.len();
         let mode = self.mode.clone();
+
+        // Build full session list for selector: active first (if any), then background
+        let all_sessions: Vec<(String, String)> = self
+            .active
+            .iter()
+            .map(|p| (p.name.clone(), p.path.display().to_string()))
+            .chain(
+                self.background
+                    .iter()
+                    .map(|p| (p.name.clone(), p.path.display().to_string())),
+            )
+            .collect();
 
         // Get status bar render data
         let bottom_left = self.status_bar.render_bottom_left();
@@ -277,7 +288,7 @@ impl TuiSessionManager {
                     self.help_popup.render(frame, area);
                 }
                 UiMode::ListSessions => {
-                    self.session_picker.render(frame, area, &session_names);
+                    self.session_selector.render(frame, area, &all_sessions);
                 }
                 UiMode::NewSession => {
                     self.create_dialog.render(frame, area);
@@ -297,8 +308,9 @@ impl TuiSessionManager {
             self.create_dialog.clear();
             self.mode = UiMode::NewSession;
         } else if is_hotkey(bytes, CTRL_L) {
-            if !self.background.is_empty() {
-                self.session_picker.select(Some(0));
+            // Open selector if there are any sessions to show (active or background)
+            if self.active.is_some() || !self.background.is_empty() {
+                self.open_session_selector();
                 self.mode = UiMode::ListSessions;
             }
         } else if let Some(ref mut pair) = self.active {
@@ -357,8 +369,8 @@ impl TuiSessionManager {
             self.create_dialog.clear();
             self.mode = UiMode::NewSession;
         } else if is_hotkey(bytes, CTRL_L) {
-            if !self.background.is_empty() {
-                self.session_picker.select(Some(0));
+            if self.active.is_some() || !self.background.is_empty() {
+                self.open_session_selector();
                 self.mode = UiMode::ListSessions;
             } else {
                 self.mode = UiMode::Normal;
@@ -370,22 +382,47 @@ impl TuiSessionManager {
         Ok(())
     }
 
+    fn open_session_selector(&mut self) {
+        self.session_selector.reset();
+
+        // Active session is at index 0 if it exists
+        if self.active.is_some() {
+            self.session_selector.set_active_index(Some(0));
+        }
+
+        // Build session list and update filter
+        let sessions = self.build_session_list();
+        self.session_selector.update_filter(&sessions);
+    }
+
+    fn build_session_list(&self) -> Vec<(String, String)> {
+        self.active
+            .iter()
+            .map(|p| (p.name.clone(), p.path.display().to_string()))
+            .chain(
+                self.background
+                    .iter()
+                    .map(|p| (p.name.clone(), p.path.display().to_string())),
+            )
+            .collect()
+    }
+
     fn handle_list_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
 
-        let session_count = self.background.len();
-
+        // Handle escape sequences (arrows, escape key)
         if bytes[0] == 0x1b {
             if bytes.len() == 1 {
+                // Escape key - close selector
                 self.mode = UiMode::Normal;
                 return Ok(());
             }
             if bytes.len() >= 3 && bytes[1] == b'[' {
                 match bytes[2] {
-                    b'A' => self.session_picker.move_selection(-1, session_count),
-                    b'B' => self.session_picker.move_selection(1, session_count),
+                    b'A' => self.session_selector.move_up(),   // Up arrow
+                    b'B' => self.session_selector.move_down(), // Down arrow
                     _ => {}
                 }
             }
@@ -394,14 +431,24 @@ impl TuiSessionManager {
 
         match bytes[0] {
             b'\r' | b'\n' => {
-                if let Some(selected) = self.session_picker.selected() {
-                    self.switch_to_index(selected)?;
+                // Enter - select the session
+                if let Some(selected) = self.session_selector.selected_original_index() {
+                    self.switch_to_session(selected)?;
                 }
                 self.mode = UiMode::Normal;
             }
-            b'j' => self.session_picker.move_selection(1, session_count),
-            b'k' => self.session_picker.move_selection(-1, session_count),
-            b'q' => self.mode = UiMode::Normal,
+            0x7f => {
+                // Backspace - remove character from filter
+                self.session_selector.pop_char();
+                let sessions = self.build_session_list();
+                self.session_selector.update_filter(&sessions);
+            }
+            b if b.is_ascii_graphic() || b == b' ' => {
+                // Printable character - add to filter
+                self.session_selector.push_char(b as char);
+                let sessions = self.build_session_list();
+                self.session_selector.update_filter(&sessions);
+            }
             _ => {}
         }
 
@@ -443,12 +490,24 @@ impl TuiSessionManager {
         Ok(())
     }
 
-    fn switch_to_index(&mut self, index: usize) -> anyhow::Result<()> {
-        if index >= self.background.len() {
+    /// Switch to a session by its index in the combined list (active + background).
+    /// Index 0 is the active session if one exists.
+    fn switch_to_session(&mut self, index: usize) -> anyhow::Result<()> {
+        let has_active = self.active.is_some();
+
+        if has_active && index == 0 {
+            // Already on active session, nothing to do
             return Ok(());
         }
 
-        let bg_pair = self.background.remove(index);
+        // Adjust index to account for active session at position 0
+        let bg_index = if has_active { index - 1 } else { index };
+
+        if bg_index >= self.background.len() {
+            return Ok(());
+        }
+
+        let bg_pair = self.background.remove(bg_index);
 
         if let Some(old_pair) = self.active.take() {
             self.background.push(old_pair.detach());
