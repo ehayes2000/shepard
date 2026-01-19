@@ -46,7 +46,7 @@ impl CreateDialog {
         let block = Block::default()
             .title(" New Session ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Magenta))
+            .border_style(Style::default().fg(Color::White))
             .style(Style::default().bg(Color::Black));
 
         let inner = block.inner(popup_area);
@@ -55,13 +55,13 @@ impl CreateDialog {
         let display_text = if self.input.is_empty() {
             Line::from(vec![
                 Span::styled("Name: ", Style::default().fg(Color::Gray)),
-                Span::styled("_", Style::default().fg(Color::Yellow)),
+                Span::styled("_", Style::default().fg(Color::Magenta)),
             ])
         } else {
             Line::from(vec![
                 Span::styled("Name: ", Style::default().fg(Color::Gray)),
                 Span::raw(&self.input),
-                Span::styled("_", Style::default().fg(Color::Yellow)),
+                Span::styled("_", Style::default().fg(Color::Magenta)),
             ])
         };
 

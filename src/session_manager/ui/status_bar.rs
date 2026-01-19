@@ -91,7 +91,7 @@ impl StatusBar {
             Span::styled(
                 "ctrl+h",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" help "),

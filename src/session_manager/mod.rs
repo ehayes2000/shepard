@@ -42,6 +42,7 @@ const CTRL_L: u8 = 0x0C;
 const CTRL_X: u8 = 0x18;
 const CTRL_BACKSLASH: u8 = 0x1c;
 const CTRL_W: u8 = 0x17;
+const CTRL_D: u8 = 0x04;
 
 #[derive(Default, Clone, PartialEq)]
 enum UiMode {
@@ -82,6 +83,8 @@ pub struct TuiSessionManager {
     history: SessionHistory,
     /// Terminal multiplexers keyed by session name (persists across view switches)
     multiplexers: HashMap<String, TerminalMultiplexer>,
+    /// Flag to signal the main loop to exit
+    should_quit: bool,
 }
 
 impl TuiSessionManager {
@@ -143,6 +146,7 @@ impl TuiSessionManager {
             selector_live_count: 0,
             history,
             multiplexers: HashMap::new(),
+            should_quit: false,
         })
     }
 
@@ -237,6 +241,10 @@ impl TuiSessionManager {
 
     pub fn run(&mut self) -> anyhow::Result<()> {
         loop {
+            if self.should_quit {
+                break;
+            }
+
             // Check for dead sessions before rendering
             self.check_dead_sessions();
 
@@ -395,6 +403,7 @@ impl TuiSessionManager {
             [b] if *b == CTRL_N => CTRL_N,
             [b] if *b == CTRL_L => CTRL_L,
             [b] if *b == CTRL_X => CTRL_X,
+            [b] if *b == CTRL_D => CTRL_D,
             _ => return Ok(false),
         };
 
@@ -438,6 +447,9 @@ impl TuiSessionManager {
                     }
                     self.mode = UiMode::KillConfirmation;
                 }
+            }
+            CTRL_D => {
+                self.should_quit = true;
             }
             _ => return Ok(false),
         }

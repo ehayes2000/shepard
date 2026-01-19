@@ -9,11 +9,17 @@ use vt100::Screen;
 /// A widget that renders a vt100 terminal screen
 pub struct PtyWidget<'a> {
     screen: &'a mut Screen,
+    dimmed: bool,
 }
 
 impl<'a> PtyWidget<'a> {
     pub fn new(screen: &'a mut Screen) -> Self {
-        Self { screen }
+        Self { screen, dimmed: false }
+    }
+
+    pub fn dimmed(mut self, dimmed: bool) -> Self {
+        self.dimmed = dimmed;
+        self
     }
 }
 
@@ -23,7 +29,10 @@ impl Widget for PtyWidget<'_> {
         for row in 0..area.height {
             for col in 0..area.width {
                 if let Some(cell) = self.screen.cell(row, col) {
-                    let style = vt100_to_ratatui_style(cell);
+                    let mut style = vt100_to_ratatui_style(cell);
+                    if self.dimmed {
+                        style = style.add_modifier(Modifier::DIM);
+                    }
                     let x = area.x + col;
                     let y = area.y + row;
 

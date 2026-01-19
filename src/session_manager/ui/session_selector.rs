@@ -180,7 +180,7 @@ impl SessionSelector {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
+                    .border_style(Style::default().fg(Color::White))
                     .title(" Filter "),
             )
             .style(Style::default().fg(Color::White));
@@ -236,11 +236,11 @@ impl SessionSelector {
             .block(
                 Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .border_style(Style::default().fg(Color::White)),
             )
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("> ");

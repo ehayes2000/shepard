@@ -3,7 +3,6 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders},
 };
 
 use crate::pty_widget::PtyWidget;
@@ -111,13 +110,13 @@ impl TerminalMultiplexer {
 
     fn render_hotkey_bar(&self, frame: &mut Frame, area: Rect) {
         let hotkeys = Line::from(vec![
-            Span::styled(" ^\\", Style::default().fg(Color::Yellow)),
+            Span::styled(" ^\\", Style::default().fg(Color::Magenta)),
             Span::raw(" Split  "),
-            Span::styled("^W", Style::default().fg(Color::Yellow)),
+            Span::styled("^W", Style::default().fg(Color::Magenta)),
             Span::raw(" Close  "),
-            Span::styled("^H", Style::default().fg(Color::Yellow)),
+            Span::styled("^H", Style::default().fg(Color::Magenta)),
             Span::raw(" Left  "),
-            Span::styled("^L", Style::default().fg(Color::Yellow)),
+            Span::styled("^L", Style::default().fg(Color::Magenta)),
             Span::raw(" Right"),
         ]);
 
@@ -129,34 +128,48 @@ impl TerminalMultiplexer {
             return area;
         }
 
-        // Create equal-width constraints for each pane
-        let constraints: Vec<Constraint> = self
-            .panes
-            .iter()
-            .map(|_| Constraint::Ratio(1, self.panes.len() as u32))
-            .collect();
+        // Single pane: no dividers needed
+        if self.panes.len() == 1 {
+            let pane = &self.panes[0];
+            let screen = pane.get_screen();
+            let mut display_screen = (*screen).clone();
+            let (cursor_row, cursor_col) = display_screen.cursor_position();
 
-        let pane_areas = Layout::horizontal(constraints).split(area);
+            let widget = PtyWidget::new(&mut display_screen);
+            frame.render_widget(widget, area);
+
+            let cursor_x = area.x + cursor_col;
+            let cursor_y = area.y + cursor_row;
+            if cursor_x < area.x + area.width && cursor_y < area.y + area.height {
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
+            return area;
+        }
+
+        // Multiple panes: create constraints with dividers between them
+        // Pattern: [Pane, Divider, Pane, Divider, ..., Pane]
+        let num_panes = self.panes.len();
+        let num_dividers = num_panes - 1;
+        let total_divider_width = num_dividers as u16;
+        let pane_width = area.width.saturating_sub(total_divider_width) / num_panes as u16;
+
+        let mut constraints = Vec::with_capacity(num_panes + num_dividers);
+        for i in 0..num_panes {
+            constraints.push(Constraint::Length(pane_width));
+            if i < num_panes - 1 {
+                constraints.push(Constraint::Length(1)); // Divider
+            }
+        }
+
+        let chunks = Layout::horizontal(constraints).split(area);
 
         let mut inner_area = Rect::default();
+        let divider_style = Style::default().fg(Color::White);
 
         for (i, pane) in self.panes.iter().enumerate() {
             let is_active = i == self.active_pane;
-            let pane_area = pane_areas[i];
-
-            // Create border with different color for active pane
-            let border_color = if is_active {
-                Color::LightMagenta
-            } else {
-                Color::White
-            };
-
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color));
-
-            let inner = block.inner(pane_area);
-            frame.render_widget(block, pane_area);
+            // Pane areas are at even indices (0, 2, 4, ...)
+            let pane_area = chunks[i * 2];
 
             // Render the terminal content
             let screen = pane.get_screen();
@@ -165,17 +178,27 @@ impl TerminalMultiplexer {
             // Get cursor position before rendering (and potentially resizing)
             let (cursor_row, cursor_col) = display_screen.cursor_position();
 
-            let widget = PtyWidget::new(&mut display_screen);
-            frame.render_widget(widget, inner);
+            let widget = PtyWidget::new(&mut display_screen).dimmed(!is_active);
+            frame.render_widget(widget, pane_area);
 
             // Position the cursor in the active pane
             if is_active {
-                inner_area = inner;
-                let cursor_x = inner.x + cursor_col;
-                let cursor_y = inner.y + cursor_row;
+                inner_area = pane_area;
+                let cursor_x = pane_area.x + cursor_col;
+                let cursor_y = pane_area.y + cursor_row;
                 // Only set cursor if it's within the visible area
-                if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
+                if cursor_x < pane_area.x + pane_area.width && cursor_y < pane_area.y + pane_area.height {
                     frame.set_cursor_position((cursor_x, cursor_y));
+                }
+            }
+
+            // Render divider after this pane (if not the last pane)
+            if i < num_panes - 1 {
+                let divider_area = chunks[i * 2 + 1];
+                for y in divider_area.y..divider_area.y + divider_area.height {
+                    frame.buffer_mut()[(divider_area.x, y)]
+                        .set_char('│')
+                        .set_style(divider_style);
                 }
             }
         }

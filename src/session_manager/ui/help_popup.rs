@@ -20,6 +20,7 @@ impl HelpPopup {
             ("ctrl+n", "New session"),
             ("ctrl+l", "List sessions"),
             ("ctrl+x", "Kill session"),
+            ("ctrl+d", "Quit"),
         ];
 
         let content_width = hotkeys
@@ -44,7 +45,7 @@ impl HelpPopup {
                     Span::styled(
                         *key,
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(Color::Magenta)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(" - "),
@@ -57,7 +58,7 @@ impl HelpPopup {
             Block::default()
                 .title(" Help ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Magenta))
+                .border_style(Style::default().fg(Color::White))
                 .style(Style::default().bg(Color::Black)),
         );
 

@@ -29,7 +29,7 @@ impl KillConfirmDialog {
                 Span::styled(
                     "y",
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" - Yes, kill it"),
@@ -38,14 +38,14 @@ impl KillConfirmDialog {
                 Span::styled(
                     "n",
                     Style::default()
-                        .fg(Color::Red)
+                        .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" / "),
                 Span::styled(
                     "Esc",
                     Style::default()
-                        .fg(Color::Red)
+                        .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" - Cancel"),
@@ -71,7 +71,7 @@ impl KillConfirmDialog {
             Block::default()
                 .title(" Kill Session ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red))
+                .border_style(Style::default().fg(Color::White))
                 .style(Style::default().bg(Color::Black)),
         );
 

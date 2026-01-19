@@ -58,7 +58,7 @@ impl MainView {
 
         let mut block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Magenta))
+            .border_style(Style::default().fg(Color::White))
             .title(Line::from(top_title).left_aligned());
 
         // Bottom left: hotkeys
