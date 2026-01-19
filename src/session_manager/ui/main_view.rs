@@ -31,6 +31,7 @@ impl MainView {
         background_count: usize,
         bottom_left: Line<'static>,
         bottom_center: Option<Line<'static>>,
+        scroll_offset: usize,
     ) -> Rect {
         let area = frame.area();
 
@@ -85,7 +86,7 @@ impl MainView {
         frame.render_widget(block, area);
 
         if let Some(screen) = screen {
-            let widget = PtyWidget::new(screen.as_ref());
+            let widget = PtyWidget::new(screen.as_ref()).scroll_offset(scroll_offset);
             frame.render_widget(widget, inner);
         }
 
