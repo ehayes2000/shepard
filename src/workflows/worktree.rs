@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::session_manager::StatusMessage;
 use std::process::Command;
 
 use super::{SessionMetadata, Workflow};
@@ -7,32 +8,48 @@ use super::{SessionMetadata, Workflow};
 pub struct WorktreeWorkflow;
 
 impl WorktreeWorkflow {
+    const NAME: &'static str = "worktree";
+
+    fn error(log_message: impl Into<String>) -> StatusMessage {
+        StatusMessage::err(format!("Workflow {} failed", Self::NAME), log_message)
+    }
+
     /// Get the repository name from the current directory
-    fn get_repo_name() -> anyhow::Result<String> {
+    fn get_repo_name() -> Result<String, StatusMessage> {
         let output = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
-            .output()?;
+            .output()
+            .map_err(|e| Self::error(format!("failed to run git rev-parse: {}", e)))?;
 
         if !output.status.success() {
-            anyhow::bail!("not in a git repository");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Self::error(format!(
+                "not in a git repository: {}",
+                stderr.trim()
+            )));
         }
 
-        let repo_path = String::from_utf8(output.stdout)?.trim().to_string();
+        let repo_path = String::from_utf8(output.stdout)
+            .map_err(|e| Self::error(format!("invalid utf8 in git output: {}", e)))?
+            .trim()
+            .to_string();
+
         let repo_name = std::path::Path::new(&repo_path)
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow::anyhow!("could not determine repository name"))?
+            .ok_or_else(|| Self::error("could not determine repository name from path"))?
             .to_string();
 
         Ok(repo_name)
     }
 
     /// Get the main branch name (main or master)
-    fn get_main_branch() -> anyhow::Result<String> {
+    fn get_main_branch() -> Result<String, StatusMessage> {
         // Check if 'main' exists
         let output = Command::new("git")
             .args(["rev-parse", "--verify", "main"])
-            .output()?;
+            .output()
+            .map_err(|e| Self::error(format!("failed to run git rev-parse: {}", e)))?;
 
         if output.status.success() {
             return Ok("main".to_string());
@@ -41,18 +58,28 @@ impl WorktreeWorkflow {
         // Fall back to 'master'
         let output = Command::new("git")
             .args(["rev-parse", "--verify", "master"])
-            .output()?;
+            .output()
+            .map_err(|e| Self::error(format!("failed to run git rev-parse: {}", e)))?;
 
         if output.status.success() {
             return Ok("master".to_string());
         }
 
-        anyhow::bail!("could not find main or master branch")
+        Err(Self::error("could not find main or master branch"))
     }
 }
 
 impl Workflow for WorktreeWorkflow {
-    fn pre_session_hook(&self, session_name: &str, config: &Config, _startup_path: &std::path::Path) -> anyhow::Result<SessionMetadata> {
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn pre_session_hook(
+        &self,
+        session_name: &str,
+        config: &Config,
+        _startup_path: &std::path::Path,
+    ) -> Result<SessionMetadata, StatusMessage> {
         let repo_name = Self::get_repo_name()?;
         let main_branch = Self::get_main_branch()?;
 
@@ -62,11 +89,16 @@ impl Workflow for WorktreeWorkflow {
         // Fetch latest from origin
         let output = Command::new("git")
             .args(["fetch", "origin", &main_branch])
-            .output()?;
+            .output()
+            .map_err(|e| Self::error(format!("failed to run git fetch: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("failed to fetch origin/{}: {}", main_branch, stderr);
+            return Err(Self::error(format!(
+                "git fetch origin/{} failed: {}",
+                main_branch,
+                stderr.trim()
+            )));
         }
 
         // Create the worktree with a new branch based on origin/main
@@ -79,11 +111,15 @@ impl Workflow for WorktreeWorkflow {
                 worktree_path.to_str().unwrap(),
                 &format!("origin/{}", main_branch),
             ])
-            .output()?;
+            .output()
+            .map_err(|e| Self::error(format!("failed to run git worktree add: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("failed to create worktree: {}", stderr);
+            return Err(Self::error(format!(
+                "git worktree add failed: {}",
+                stderr.trim()
+            )));
         }
 
         Ok(SessionMetadata {
