@@ -52,11 +52,7 @@ impl KillConfirmDialog {
             ]),
         ];
 
-        let max_line_len = lines
-            .iter()
-            .map(|l| l.width())
-            .max()
-            .unwrap_or(20);
+        let max_line_len = lines.iter().map(|l| l.width()).max().unwrap_or(20);
 
         let popup_width = (max_line_len as u16 + 4).min(area.width.saturating_sub(4));
         let popup_height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));

@@ -24,12 +24,7 @@ pub struct ActivePair {
 }
 
 impl ActivePair {
-    pub fn new(
-        name: String,
-        path: PathBuf,
-        claude: AttachedSession,
-        resumed: bool,
-    ) -> Self {
+    pub fn new(name: String, path: PathBuf, claude: AttachedSession, resumed: bool) -> Self {
         Self {
             name,
             path,

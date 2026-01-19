@@ -19,6 +19,7 @@ impl HelpPopup {
             ("ctrl+t", "Toggle shell"),
             ("ctrl+n", "New session"),
             ("ctrl+l", "List sessions"),
+            ("ctrl+k", "Cleanup worktrees"),
             ("ctrl+x", "Kill session"),
             ("ctrl+d", "Quit"),
         ];

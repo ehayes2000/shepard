@@ -10,8 +10,8 @@ use ratatui::{
 };
 use vt100::Screen;
 
-use crate::pty_widget::PtyWidget;
 use super::super::session_pair::SessionView;
+use crate::pty_widget::PtyWidget;
 
 pub struct MainView;
 
@@ -102,8 +102,9 @@ impl Default for MainView {
 
 fn path_relative_to_home(path: &Path) -> String {
     if let Some(home) = dirs::home_dir()
-        && let Ok(relative) = path.strip_prefix(&home) {
-            return format!("~/{}", relative.display());
-        }
+        && let Ok(relative) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", relative.display());
+    }
     path.display().to_string()
 }
