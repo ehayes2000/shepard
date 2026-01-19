@@ -38,10 +38,6 @@ const CTRL_T: u8 = 0x14;
 const CTRL_N: u8 = 0x0E;
 const CTRL_L: u8 = 0x0C;
 
-fn is_hotkey(bytes: &[u8], key: u8) -> bool {
-    bytes.len() == 1 && bytes[0] == key
-}
-
 #[derive(Default, Clone, PartialEq)]
 enum UiMode {
     #[default]
@@ -227,18 +223,71 @@ impl TuiSessionManager {
                 .input_rx
                 .recv_timeout(std::time::Duration::from_millis(16))
             {
-                Ok(bytes) => match self.mode {
-                    UiMode::Normal => self.handle_normal_input(&bytes)?,
-                    UiMode::HelpPopup => self.handle_help_input(&bytes)?,
-                    UiMode::ListSessions => self.handle_list_input(&bytes)?,
-                    UiMode::NewSession => self.handle_new_session_input(&bytes)?,
-                },
+                Ok(bytes) => {
+                    if !self.handle_hotkey(&bytes)? {
+                        match self.mode {
+                            UiMode::Normal => self.handle_normal_input(&bytes)?,
+                            UiMode::HelpPopup => self.handle_help_input(&bytes)?,
+                            UiMode::ListSessions => self.handle_list_input(&bytes)?,
+                            UiMode::NewSession => self.handle_new_session_input(&bytes)?,
+                        }
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
 
         Ok(())
+    }
+
+    /// Handle global hotkeys. Returns true if a hotkey was processed.
+    fn handle_hotkey(&mut self, bytes: &[u8]) -> anyhow::Result<bool> {
+        let hotkey = match bytes {
+            [b] if *b == CTRL_H => CTRL_H,
+            [b] if *b == CTRL_T => CTRL_T,
+            [b] if *b == CTRL_N => CTRL_N,
+            [b] if *b == CTRL_L => CTRL_L,
+            _ => return Ok(false),
+        };
+
+        // Clean up current mode before switching
+        if self.mode == UiMode::NewSession {
+            self.create_dialog.clear();
+        }
+
+        match hotkey {
+            CTRL_H => {
+                self.mode = if self.mode == UiMode::HelpPopup {
+                    UiMode::Normal
+                } else {
+                    UiMode::HelpPopup
+                };
+            }
+            CTRL_T => {
+                self.mode = UiMode::Normal;
+                self.toggle_shell()?;
+            }
+            CTRL_N => {
+                if self.mode != UiMode::NewSession {
+                    self.create_dialog.clear();
+                    self.mode = UiMode::NewSession;
+                }
+            }
+            CTRL_L => {
+                if self.mode == UiMode::ListSessions {
+                    self.mode = UiMode::Normal;
+                } else if self.active.is_some() || !self.background.is_empty() {
+                    self.open_session_selector();
+                    self.mode = UiMode::ListSessions;
+                } else {
+                    self.mode = UiMode::Normal;
+                }
+            }
+            _ => return Ok(false),
+        }
+
+        Ok(true)
     }
 
     fn render_frame(&mut self) -> anyhow::Result<ratatui::layout::Rect> {
@@ -304,20 +353,7 @@ impl TuiSessionManager {
     }
 
     fn handle_normal_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-        if is_hotkey(bytes, CTRL_H) {
-            self.mode = UiMode::HelpPopup;
-        } else if is_hotkey(bytes, CTRL_T) {
-            self.toggle_shell()?;
-        } else if is_hotkey(bytes, CTRL_N) {
-            self.create_dialog.clear();
-            self.mode = UiMode::NewSession;
-        } else if is_hotkey(bytes, CTRL_L) {
-            // Open selector if there are any sessions to show (active or background)
-            if self.active.is_some() || !self.background.is_empty() {
-                self.open_session_selector();
-                self.mode = UiMode::ListSessions;
-            }
-        } else if let Some(ref mut pair) = self.active {
+        if let Some(ref mut pair) = self.active {
             match pair.view {
                 SessionView::Claude => pair.claude.write_input(bytes)?,
                 SessionView::Shell => {
@@ -359,28 +395,8 @@ impl TuiSessionManager {
     }
 
     fn handle_help_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-
-        // Hotkeys work from help popup and close it
-        if is_hotkey(bytes, CTRL_H) {
-            self.mode = UiMode::Normal;
-        } else if is_hotkey(bytes, CTRL_T) {
-            self.mode = UiMode::Normal;
-            self.toggle_shell()?;
-        } else if is_hotkey(bytes, CTRL_N) {
-            self.create_dialog.clear();
-            self.mode = UiMode::NewSession;
-        } else if is_hotkey(bytes, CTRL_L) {
-            if self.active.is_some() || !self.background.is_empty() {
-                self.open_session_selector();
-                self.mode = UiMode::ListSessions;
-            } else {
-                self.mode = UiMode::Normal;
-            }
-        } else {
-            // Any other key just closes help
+        // Any non-hotkey key closes help
+        if !bytes.is_empty() {
             self.mode = UiMode::Normal;
         }
         Ok(())
