@@ -19,6 +19,7 @@ impl HelpPopup {
             ("ctrl+t", "Toggle shell"),
             ("ctrl+n", "New session"),
             ("ctrl+l", "List sessions"),
+            ("ctrl+x", "Kill session"),
         ];
 
         let content_width = hotkeys

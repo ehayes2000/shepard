@@ -2,7 +2,7 @@ mod session_pair;
 mod ui;
 
 pub use ui::StatusMessage;
-use ui::{CreateDialog, HelpPopup, MainView, SessionSelector, StatusBar};
+use ui::{CreateDialog, HelpPopup, KillConfirmDialog, MainView, SessionSelector, StatusBar};
 
 use crossterm::ExecutableCommand;
 use crossterm::terminal::{
@@ -37,6 +37,7 @@ const CTRL_H: u8 = 0x08;
 const CTRL_T: u8 = 0x14;
 const CTRL_N: u8 = 0x0E;
 const CTRL_L: u8 = 0x0C;
+const CTRL_X: u8 = 0x18;
 
 #[derive(Default, Clone, PartialEq)]
 enum UiMode {
@@ -45,6 +46,7 @@ enum UiMode {
     HelpPopup,
     ListSessions,
     NewSession,
+    KillConfirmation,
 }
 
 pub struct TuiSessionManager {
@@ -63,6 +65,7 @@ pub struct TuiSessionManager {
     help_popup: HelpPopup,
     session_selector: SessionSelector,
     create_dialog: CreateDialog,
+    kill_confirm_dialog: KillConfirmDialog,
     status_bar: StatusBar,
     status_tx: Sender<StatusMessage>,
     /// Original active session name when selector opened (for revert on escape)
@@ -121,6 +124,7 @@ impl TuiSessionManager {
             help_popup: HelpPopup::new(),
             session_selector: SessionSelector::new(),
             create_dialog: CreateDialog::new(),
+            kill_confirm_dialog: KillConfirmDialog::new(),
             status_bar,
             status_tx,
             selector_original_session: None,
@@ -229,6 +233,7 @@ impl TuiSessionManager {
                             UiMode::HelpPopup => self.handle_help_input(&bytes)?,
                             UiMode::ListSessions => self.handle_list_input(&bytes)?,
                             UiMode::NewSession => self.handle_new_session_input(&bytes)?,
+                            UiMode::KillConfirmation => self.handle_kill_confirmation_input(&bytes)?,
                         }
                     }
                 }
@@ -299,6 +304,7 @@ impl TuiSessionManager {
             [b] if *b == CTRL_T => CTRL_T,
             [b] if *b == CTRL_N => CTRL_N,
             [b] if *b == CTRL_L => CTRL_L,
+            [b] if *b == CTRL_X => CTRL_X,
             _ => return Ok(false),
         };
 
@@ -333,6 +339,14 @@ impl TuiSessionManager {
                     self.mode = UiMode::ListSessions;
                 } else {
                     self.mode = UiMode::Normal;
+                }
+            }
+            CTRL_X => {
+                if self.active.is_some() {
+                    if let Some(ref pair) = self.active {
+                        self.kill_confirm_dialog.set_session_name(&pair.name);
+                    }
+                    self.mode = UiMode::KillConfirmation;
                 }
             }
             _ => return Ok(false),
@@ -396,6 +410,9 @@ impl TuiSessionManager {
                 }
                 UiMode::NewSession => {
                     self.create_dialog.render(frame, area);
+                }
+                UiMode::KillConfirmation => {
+                    self.kill_confirm_dialog.render(frame, area);
                 }
             }
         })?;
@@ -470,6 +487,41 @@ impl TuiSessionManager {
         if !bytes.is_empty() {
             self.mode = UiMode::Normal;
         }
+        Ok(())
+    }
+
+    fn handle_kill_confirmation_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        match bytes[0] {
+            // Escape key
+            0x1b if bytes.len() == 1 => {
+                self.mode = UiMode::Normal;
+            }
+            // 'y' or 'Y' - confirm kill
+            b'y' | b'Y' => {
+                if let Some(pair) = self.active.take() {
+                    let name = pair.name.clone();
+                    pair.claude.shutdown();
+                    if let Some(ref shell) = pair.shell {
+                        shell.shutdown();
+                    }
+                    let _ = self.status_tx.send(StatusMessage::info(
+                        "Session killed",
+                        format!("Killed session '{}'", name),
+                    ));
+                }
+                self.mode = UiMode::Normal;
+            }
+            // 'n' or 'N' or any other key - cancel
+            b'n' | b'N' => {
+                self.mode = UiMode::Normal;
+            }
+            _ => {}
+        }
+
         Ok(())
     }
 

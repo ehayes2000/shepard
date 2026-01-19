@@ -10,6 +10,7 @@ const MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StatusLevel {
+    Info,
     Err,
 }
 
@@ -31,6 +32,10 @@ impl StatusMessage {
             display_message: display_message.into(),
             log_message: log_message.into(),
         }
+    }
+
+    pub fn info(display: impl Into<String>, log: impl Into<String>) -> Self {
+        Self::new(StatusLevel::Info, display, log)
     }
 
     pub fn err(display: impl Into<String>, log: impl Into<String>) -> Self {
@@ -96,7 +101,11 @@ impl StatusBar {
 
     pub fn render_bottom_center(&self) -> Option<Line<'static>> {
         self.current.as_ref().map(|active| {
-            let style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+            let color = match active.message.level {
+                StatusLevel::Info => Color::Cyan,
+                StatusLevel::Err => Color::Red,
+            };
+            let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
 
             Line::from(vec![
                 Span::raw(" "),
@@ -148,6 +157,7 @@ impl EventLog {
 
         // Create new entry with timestamp and level
         let level_str = match msg.level {
+            StatusLevel::Info => "INFO",
             StatusLevel::Err => "ERR",
         };
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
