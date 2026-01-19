@@ -703,14 +703,6 @@ impl TuiSessionManager {
             return Ok(());
         }
 
-        // Escape key - switch from shell back to Claude view
-        if bytes == [0x1b] && view == SessionView::Shell {
-            if let Some(ref mut pair) = self.active {
-                pair.view = SessionView::Claude;
-            }
-            return Ok(());
-        }
-
         // Any other input resets scroll to bottom
         if let Some(ref mut pair) = self.active {
             pair.scroll_offset = 0;
