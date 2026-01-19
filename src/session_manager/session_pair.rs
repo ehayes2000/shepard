@@ -17,6 +17,8 @@ pub struct ActivePair {
     pub view: SessionView,
     pub claude: AttachedSession,
     pub shell: Option<AttachedSession>,
+    /// Whether this session was started via resume (--continue flag)
+    pub resumed: bool,
 }
 
 impl ActivePair {
@@ -24,6 +26,7 @@ impl ActivePair {
         name: String,
         path: PathBuf,
         claude: AttachedSession,
+        resumed: bool,
     ) -> Self {
         Self {
             name,
@@ -31,6 +34,7 @@ impl ActivePair {
             view: SessionView::Claude,
             claude,
             shell: None,
+            resumed,
         }
     }
 
@@ -41,6 +45,7 @@ impl ActivePair {
             last_view: self.view,
             claude: self.claude.detach(),
             shell: self.shell.map(|s| s.detach()),
+            resumed: self.resumed,
         }
     }
 }
@@ -52,6 +57,8 @@ pub struct BackgroundPair {
     pub last_view: SessionView,
     pub claude: DetachedSession,
     pub shell: Option<DetachedSession>,
+    /// Whether this session was started via resume (--continue flag)
+    pub resumed: bool,
 }
 
 impl BackgroundPair {
@@ -62,6 +69,7 @@ impl BackgroundPair {
             view: self.last_view,
             claude: self.claude.attach()?,
             shell: self.shell.map(|s| s.attach()).transpose()?,
+            resumed: self.resumed,
         })
     }
 }

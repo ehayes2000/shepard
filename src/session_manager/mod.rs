@@ -26,11 +26,10 @@ const BUF_SIZE: usize = 1024;
 
 /// Convert an absolute path to a home-relative path string with `~`.
 fn path_to_display(path: &Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(suffix) = path.strip_prefix(&home) {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(suffix) = path.strip_prefix(&home) {
             return format!("~/{}", suffix.display());
         }
-    }
     path.display().to_string()
 }
 const CTRL_H: u8 = 0x08;
@@ -148,6 +147,7 @@ impl TuiSessionManager {
         command: &str,
         args: &[&str],
         cwd: &Path,
+        resumed: bool,
     ) -> anyhow::Result<()> {
         let session = self.create_session(command, args, cwd)?;
 
@@ -159,6 +159,7 @@ impl TuiSessionManager {
             name.to_string(),
             cwd.to_path_buf(),
             session,
+            resumed,
         ));
         Ok(())
     }
@@ -184,7 +185,7 @@ impl TuiSessionManager {
 
         let args_owned = self.config.claude_args.clone();
         let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
-        self.add_claude_session(name, "claude", &args, &metadata.path)
+        self.add_claude_session(name, "claude", &args, &metadata.path, false)
     }
 
     pub fn try_resume(&mut self) -> anyhow::Result<bool> {
@@ -205,7 +206,7 @@ impl TuiSessionManager {
         args_owned.extend(self.config.claude_args.clone());
         let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
 
-        self.add_claude_session(&recent.name, "claude", &args, &recent.path)?;
+        self.add_claude_session(&recent.name, "claude", &args, &recent.path, true)?;
         Ok(true)
     }
 
@@ -247,7 +248,8 @@ impl TuiSessionManager {
 
     /// Check if the active session has died and handle cleanup
     fn check_dead_sessions(&mut self) {
-        let should_remove = if let Some(ref pair) = self.active {
+        // Collect info about dead session before taking ownership
+        let dead_session_info = if let Some(ref pair) = self.active {
             // Check if the currently viewed session is dead
             let viewed_dead = match pair.view {
                 SessionView::Claude => pair.claude.is_dead(),
@@ -262,6 +264,8 @@ impl TuiSessionManager {
                 };
 
                 let session_name = pair.name.clone();
+                let session_path = pair.path.clone();
+                let was_resumed = pair.resumed;
                 let view_name = match pair.view {
                     SessionView::Claude => "claude",
                     SessionView::Shell => "shell",
@@ -273,15 +277,15 @@ impl TuiSessionManager {
                     log_msg,
                 ));
 
-                true
+                Some((session_name, session_path, was_resumed))
             } else {
-                false
+                None
             }
         } else {
-            false
+            None
         };
 
-        if should_remove {
+        if let Some((name, path, was_resumed)) = dead_session_info {
             // Shutdown and remove the active session
             if let Some(pair) = self.active.take() {
                 pair.claude.shutdown();
@@ -293,6 +297,24 @@ impl TuiSessionManager {
             // Close any popups and return to normal mode
             if self.mode == UiMode::ListSessions {
                 self.mode = UiMode::Normal;
+            }
+
+            // If this was a resumed session, start a fresh session in the same directory
+            // without the --continue flag
+            if was_resumed {
+                let args_owned = self.config.claude_args.clone();
+                let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+                if let Err(e) = self.add_claude_session(&name, "claude", &args, &path, false) {
+                    let _ = self.status_tx.send(StatusMessage::err(
+                        "Failed to restart session",
+                        format!("{}", e),
+                    ));
+                } else {
+                    let _ = self.status_tx.send(StatusMessage::info(
+                        "Session restarted",
+                        format!("Started fresh session in {}", path.display()),
+                    ));
+                }
             }
         }
     }
@@ -447,7 +469,7 @@ impl TuiSessionManager {
 
             // If write failed, the session probably just died - ignore the error
             // check_dead_sessions will handle cleanup on next iteration
-            if let Err(_) = write_result {
+            if write_result.is_err() {
                 return Ok(());
             }
         }
@@ -463,15 +485,14 @@ impl TuiSessionManager {
 
         let path = self.active.as_ref().map(|p| p.path.clone());
 
-        if needs_shell {
-            if let Some(path) = path {
+        if needs_shell
+            && let Some(path) = path {
                 let shell_cmd = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                 let shell_session = self.create_session(&shell_cmd, &[], &path)?;
                 if let Some(ref mut pair) = self.active {
                     pair.shell = Some(shell_session);
                 }
             }
-        }
 
         if let Some(ref mut pair) = self.active {
             match pair.view {
@@ -621,11 +642,10 @@ impl TuiSessionManager {
     /// Switch to a session by name, searching both active and background
     fn switch_to_session_by_name(&mut self, name: &str) -> anyhow::Result<()> {
         // Check if already active
-        if let Some(ref active) = self.active {
-            if active.name == name {
+        if let Some(ref active) = self.active
+            && active.name == name {
                 return Ok(());
             }
-        }
 
         // Find in background
         let bg_index = self

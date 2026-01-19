@@ -229,7 +229,11 @@ impl AttachedSession {
                 }
 
                 match reader.read(&mut buf) {
-                    Ok(0) => break, // EOF - child process exited
+                    Ok(0) => {
+                        // EOF - child process exited
+                        shared_error.store(Arc::new(Some("Process exited".to_string())));
+                        break;
+                    }
                     Ok(n) => {
                         // Check if size changed and update both PTY and parser
                         let (rows, cols) = size.get();
@@ -279,6 +283,9 @@ impl AttachedSession {
                                 "PTY read error: {}",
                                 e
                             ))));
+                        } else {
+                            // EIO means process exited
+                            shared_error.store(Arc::new(Some("Process exited".to_string())));
                         }
                         break;
                     }

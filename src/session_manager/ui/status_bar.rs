@@ -79,11 +79,10 @@ impl StatusBar {
         }
 
         // Clear expired messages
-        if let Some(ref active) = self.current {
-            if active.received_at.elapsed() >= MESSAGE_TIMEOUT {
+        if let Some(ref active) = self.current
+            && active.received_at.elapsed() >= MESSAGE_TIMEOUT {
                 self.current = None;
             }
-        }
     }
 
     pub fn render_bottom_left(&self) -> Line<'static> {
