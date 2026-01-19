@@ -55,7 +55,14 @@ impl Widget for PtyWidget<'_> {
 }
 
 impl PtyWidget<'_> {
-    fn render_screen(&self, screen: &Screen, area: Rect, buf: &mut Buffer, display_rows: u16, cols: u16) {
+    fn render_screen(
+        &self,
+        screen: &Screen,
+        area: Rect,
+        buf: &mut Buffer,
+        display_rows: u16,
+        cols: u16,
+    ) {
         for row in 0..display_rows {
             for col in 0..cols {
                 if let Some(cell) = screen.cell(row, col) {

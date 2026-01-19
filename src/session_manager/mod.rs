@@ -225,11 +225,14 @@ impl TuiSessionManager {
             }
         };
 
-        self.history.set_recent_session(
-            self.startup_path.clone(),
-            name.to_string(),
-            metadata.path.clone(),
-        )?;
+        // Get repo name and project path for history
+        if let (Some(repo_name), Some(project_path)) = (
+            self.get_current_repo_name(),
+            self.get_current_project_path(),
+        ) {
+            self.history
+                .set_recent_session(repo_name, name.to_string(), project_path)?;
+        }
 
         let args_owned = self.config.claude_args.clone();
         let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
@@ -237,15 +240,22 @@ impl TuiSessionManager {
     }
 
     pub fn try_resume(&mut self) -> anyhow::Result<bool> {
-        let recent = match self.history.get_recent_session(&self.startup_path) {
+        let repo_name = match self.get_current_repo_name() {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+
+        let recent = match self.history.get_recent_session(&repo_name) {
             Some(r) => r.clone(),
             None => return Ok(false),
         };
 
-        if !recent.path.exists() {
+        let worktree_path = self.worktree_path(&repo_name, &recent.name);
+
+        if !worktree_path.exists() {
             let _ = self.status_tx.send(StatusMessage::err(
                 "Resume failed",
-                format!("Session path no longer exists: {}", recent.path.display()),
+                format!("Session path no longer exists: {}", worktree_path.display()),
             ));
             return Ok(false);
         }
@@ -254,7 +264,7 @@ impl TuiSessionManager {
         args_owned.extend(self.config.claude_args.clone());
         let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
 
-        self.add_claude_session(&recent.name, "claude", &args, &recent.path, true)?;
+        self.add_claude_session(&recent.name, "claude", &args, &worktree_path, true)?;
         Ok(true)
     }
 
@@ -621,7 +631,8 @@ impl TuiSessionManager {
             // SGR mouse mode: ESC [ < Ps ; Px ; Py M (or m for release)
             if bytes[pos..].starts_with(b"\x1b[<") {
                 // Find the end of this event (M or m)
-                if let Some(end_offset) = bytes[pos..].iter().position(|&b| b == b'M' || b == b'm') {
+                if let Some(end_offset) = bytes[pos..].iter().position(|&b| b == b'M' || b == b'm')
+                {
                     let event = &bytes[pos..pos + end_offset + 1];
 
                     // Parse the button code (between '<' and first ';')
@@ -632,8 +643,8 @@ impl TuiSessionManager {
                         // Button 64 = scroll up, 65 = scroll down
                         let base_button = button & 0b11000011;
                         match base_button {
-                            64 => total_delta += 1,  // scroll up
-                            65 => total_delta -= 1,  // scroll down
+                            64 => total_delta += 1, // scroll up
+                            65 => total_delta -= 1, // scroll down
                             _ => {}
                         }
                     }
@@ -648,8 +659,8 @@ impl TuiSessionManager {
                 let button = bytes[pos + 3];
                 let base_button = button & 0b11000011;
                 match base_button {
-                    96 => total_delta += 1,   // scroll up
-                    97 => total_delta -= 1,   // scroll down
+                    96 => total_delta += 1, // scroll up
+                    97 => total_delta -= 1, // scroll down
                     _ => {}
                 }
                 pos += 6;
@@ -684,8 +695,8 @@ impl TuiSessionManager {
 
                 if scroll_delta > 0 {
                     // Scroll up (show older content)
-                    pair.scroll_offset = (pair.scroll_offset + scroll_delta as usize)
-                        .min(MAX_SCROLLBACK);
+                    pair.scroll_offset =
+                        (pair.scroll_offset + scroll_delta as usize).min(MAX_SCROLLBACK);
                 } else {
                     // Scroll down (show newer content)
                     let abs_delta = (-scroll_delta) as usize;
@@ -933,21 +944,31 @@ impl TuiSessionManager {
             .collect();
 
         // Collect recent sessions from history that aren't currently live
-        let recent_items: Vec<(String, String)> = self
-            .history
-            .get_recent_sessions(&self.startup_path)
-            .filter(|s| !live_paths.contains(&s.path))
-            .map(|s| (s.name.clone(), path_to_display(&s.path)))
-            .collect();
+        let repo_name = self.get_current_repo_name();
+        let recent_items: Vec<(String, String)> = repo_name
+            .as_ref()
+            .map(|rn| {
+                self.history
+                    .get_recent_sessions(rn)
+                    .map(|s| (s.name.clone(), self.worktree_path(rn, &s.name)))
+                    .filter(|(_, path)| !live_paths.contains(path))
+                    .map(|(name, path)| (name, path_to_display(&path)))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let recent_count = recent_items.len();
 
         // Collect worktree directories that aren't currently live or recent
-        let recent_paths: std::collections::HashSet<_> = self
-            .history
-            .get_recent_sessions(&self.startup_path)
-            .map(|s| s.path.clone())
-            .collect();
+        let recent_paths: std::collections::HashSet<_> = repo_name
+            .as_ref()
+            .map(|rn| {
+                self.history
+                    .get_recent_sessions(rn)
+                    .map(|s| self.worktree_path(rn, &s.name))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let worktree_items: Vec<(String, String)> = self
             .list_worktree_dirs()
@@ -1012,6 +1033,30 @@ impl TuiSessionManager {
             .file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_string())
+    }
+
+    /// Get the current repository root path from git.
+    fn get_current_project_path(&self) -> Option<PathBuf> {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&self.startup_path)
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let repo_path = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        Some(PathBuf::from(repo_path))
+    }
+
+    /// Compute the worktree path for a given repo name and session name.
+    fn worktree_path(&self, repo_name: &str, session_name: &str) -> PathBuf {
+        self.config
+            .workflows_path
+            .join(repo_name)
+            .join(session_name)
     }
 
     fn handle_list_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
@@ -1352,12 +1397,18 @@ impl TuiSessionManager {
         }
 
         // Now delete the worktrees
+        let repo_name = self.get_current_repo_name();
         for worktree_path in &worktrees {
             match self.delete_worktree(worktree_path) {
                 Ok(()) => {
                     deleted_count += 1;
-                    // Remove from history
-                    self.history.remove_by_path(worktree_path);
+                    // Remove from history - extract session name from path
+                    if let (Some(rn), Some(session_name)) = (
+                        &repo_name,
+                        worktree_path.file_name().and_then(|n| n.to_str()),
+                    ) {
+                        self.history.remove_by_name(rn, session_name);
+                    }
                 }
                 Err(e) => {
                     errors.push(format!("{}: {}", worktree_path.display(), e));
