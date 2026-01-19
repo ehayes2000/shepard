@@ -1,18 +1,19 @@
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
-const MAX_HISTORY_SIZE: usize = 100;
+const MAX_RECENT_PER_WORKSPACE: usize = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HistoryEntry {
+pub struct RecentSession {
     pub name: String,
     pub path: PathBuf,
 }
 
+/// Stores recent sessions per startup directory (workspace).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionHistory {
-    entries: VecDeque<HistoryEntry>,
+    recent_sessions: HashMap<PathBuf, VecDeque<RecentSession>>,
 }
 
 impl SessionHistory {
@@ -46,30 +47,45 @@ impl SessionHistory {
         Ok(())
     }
 
-    /// Add or update an entry in history. If an entry with the same name+path exists,
-    /// it's moved to the front. Otherwise a new entry is added at the front.
-    pub fn touch(&mut self, name: String, path: PathBuf) {
-        let entry = HistoryEntry { name, path };
+    pub fn set_recent_session(
+        &mut self,
+        startup_path: PathBuf,
+        session_name: String,
+        session_path: PathBuf,
+    ) -> anyhow::Result<()> {
+        let entry = RecentSession {
+            name: session_name,
+            path: session_path,
+        };
 
-        // Remove existing entry if present
-        self.entries.retain(|e| e != &entry);
+        let sessions = self.recent_sessions.entry(startup_path).or_default();
+
+        // Remove existing entry if present (will be re-added at front)
+        sessions.retain(|s| s != &entry);
 
         // Add to front
-        self.entries.push_front(entry);
+        sessions.push_front(entry);
 
         // Trim to max size
-        while self.entries.len() > MAX_HISTORY_SIZE {
-            self.entries.pop_back();
+        while sessions.len() > MAX_RECENT_PER_WORKSPACE {
+            sessions.pop_back();
         }
+
+        self.save()
     }
 
-    /// Get all history entries (most recent first)
-    pub fn entries(&self) -> impl Iterator<Item = &HistoryEntry> {
-        self.entries.iter()
+    /// Get the most recent session for a workspace
+    pub fn get_recent_session(&self, startup_path: &PathBuf) -> Option<&RecentSession> {
+        self.recent_sessions
+            .get(startup_path)
+            .and_then(|sessions| sessions.front())
     }
 
-    /// Get a history entry by name
-    pub fn get_by_name(&self, name: &str) -> Option<&HistoryEntry> {
-        self.entries.iter().find(|e| e.name == name)
+    /// Get all recent sessions for a workspace (most recent first)
+    pub fn get_recent_sessions(&self, startup_path: &PathBuf) -> impl Iterator<Item = &RecentSession> {
+        self.recent_sessions
+            .get(startup_path)
+            .into_iter()
+            .flat_map(|sessions| sessions.iter())
     }
 }

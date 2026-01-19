@@ -2,7 +2,7 @@ mod session_pair;
 mod ui;
 
 pub use ui::StatusMessage;
-use ui::{CreateDialog, HelpPopup, KillConfirmDialog, MainView, SessionSelector, StatusBar, TerminalMultiplexer};
+use ui::{CreateDialog, HelpPopup, KillConfirmDialog, MainView, SelectorItemKind, SessionSelector, StatusBar, TerminalMultiplexer};
 
 use std::collections::HashMap;
 
@@ -77,9 +77,11 @@ pub struct TuiSessionManager {
     selector_original_session: Option<String>,
     /// Cached session list when selector opened (indices stay consistent during preview)
     selector_sessions: Vec<(String, String)>,
-    /// Number of live sessions in selector_sessions (rest are history)
+    /// Number of live sessions in selector_sessions
     selector_live_count: usize,
-    /// Session history for recently used sessions
+    /// Number of recent sessions in selector_sessions (after live, before worktrees)
+    selector_recent_count: usize,
+    /// Session history for most recent sessions per directory
     history: SessionHistory,
     /// Terminal multiplexers keyed by session name (persists across view switches)
     multiplexers: HashMap<String, TerminalMultiplexer>,
@@ -144,6 +146,7 @@ impl TuiSessionManager {
             selector_original_session: None,
             selector_sessions: Vec::new(),
             selector_live_count: 0,
+            selector_recent_count: 0,
             history,
             multiplexers: HashMap::new(),
             should_quit: false,
@@ -181,10 +184,6 @@ impl TuiSessionManager {
             resumed,
         ));
 
-        // Update history and save immediately
-        self.history.touch(name.to_string(), cwd.to_path_buf());
-        let _ = self.history.save();
-
         Ok(())
     }
 
@@ -201,7 +200,7 @@ impl TuiSessionManager {
             }
         };
 
-        self.config.set_recent_session(
+        self.history.set_recent_session(
             self.startup_path.clone(),
             name.to_string(),
             metadata.path.clone(),
@@ -213,7 +212,7 @@ impl TuiSessionManager {
     }
 
     pub fn try_resume(&mut self) -> anyhow::Result<bool> {
-        let recent = match self.config.get_recent_session(&self.startup_path) {
+        let recent = match self.history.get_recent_session(&self.startup_path) {
             Some(r) => r.clone(),
             None => return Ok(false),
         };
@@ -433,11 +432,9 @@ impl TuiSessionManager {
             CTRL_L => {
                 if self.mode == UiMode::ListSessions {
                     self.mode = UiMode::Normal;
-                } else if self.active.is_some() || !self.background.is_empty() {
+                } else {
                     self.open_session_selector();
                     self.mode = UiMode::ListSessions;
-                } else {
-                    self.mode = UiMode::Normal;
                 }
             }
             CTRL_X => {
@@ -544,6 +541,14 @@ impl TuiSessionManager {
 
         let name = pair.name.clone();
         let view = pair.view;
+
+        // Escape key - switch from shell back to Claude view
+        if bytes == [0x1b] && view == SessionView::Shell {
+            if let Some(ref mut pair) = self.active {
+                pair.view = SessionView::Claude;
+            }
+            return Ok(());
+        }
 
         match view {
             SessionView::Claude => {
@@ -754,16 +759,17 @@ impl TuiSessionManager {
         }
 
         // Cache session list (indices remain consistent during preview)
-        let (sessions, live_count) = self.build_session_list();
+        let (sessions, live_count, recent_count) = self.build_session_list();
         self.selector_sessions = sessions;
         self.selector_live_count = live_count;
-        self.session_selector.set_live_count(live_count);
+        self.selector_recent_count = recent_count;
+        self.session_selector.set_counts(live_count, recent_count);
         self.session_selector.update_filter(&self.selector_sessions);
     }
 
-    /// Build session list with live sessions first, then history items.
-    /// Returns (list, live_count) where live_count is the number of live sessions.
-    fn build_session_list(&self) -> (Vec<(String, String)>, usize) {
+    /// Build session list with live sessions first, then recent sessions, then worktree directories.
+    /// Returns (list, live_count, recent_count).
+    fn build_session_list(&self) -> (Vec<(String, String)>, usize, usize) {
         // Collect live sessions first
         let live: Vec<(String, String)> = self.active
             .iter()
@@ -777,20 +783,90 @@ impl TuiSessionManager {
 
         let live_count = live.len();
 
-        // Collect history items that aren't currently live
-        let live_names: std::collections::HashSet<_> = live.iter()
-            .map(|(name, _)| name.as_str())
+        // Collect paths that are currently live (to filter out from recent/worktrees)
+        let live_paths: std::collections::HashSet<_> = self.active
+            .iter()
+            .map(|p| p.path.clone())
+            .chain(self.background.iter().map(|p| p.path.clone()))
             .collect();
 
-        let history_items: Vec<(String, String)> = self.history.entries()
-            .filter(|entry| !live_names.contains(entry.name.as_str()))
-            .map(|entry| (entry.name.clone(), path_to_display(&entry.path)))
+        // Collect recent sessions from history that aren't currently live
+        let recent_items: Vec<(String, String)> = self.history
+            .get_recent_sessions(&self.startup_path)
+            .filter(|s| !live_paths.contains(&s.path))
+            .map(|s| (s.name.clone(), path_to_display(&s.path)))
+            .collect();
+
+        let recent_count = recent_items.len();
+
+        // Collect worktree directories that aren't currently live or recent
+        let recent_paths: std::collections::HashSet<_> = self.history
+            .get_recent_sessions(&self.startup_path)
+            .map(|s| s.path.clone())
+            .collect();
+
+        let worktree_items: Vec<(String, String)> = self.list_worktree_dirs()
+            .into_iter()
+            .filter(|path| !live_paths.contains(path) && !recent_paths.contains(path))
+            .map(|path| (String::new(), path_to_display(&path)))
             .collect();
 
         let mut list = live;
-        list.extend(history_items);
+        list.extend(recent_items);
+        list.extend(worktree_items);
 
-        (list, live_count)
+        (list, live_count, recent_count)
+    }
+
+    /// List worktree directories for the current repo.
+    /// Worktrees are stored at <workflows_path>/<reponame>/<feature-name>.
+    fn list_worktree_dirs(&self) -> Vec<PathBuf> {
+        // Get the current repo name
+        let Some(repo_name) = self.get_current_repo_name() else {
+            return Vec::new();
+        };
+
+        // Build path to repo's worktrees: <workflows_path>/<reponame>/
+        let repo_worktrees_path = self.config.workflows_path.join(&repo_name);
+
+        if !repo_worktrees_path.exists() {
+            return Vec::new();
+        }
+
+        let Ok(entries) = std::fs::read_dir(&repo_worktrees_path) else {
+            return Vec::new();
+        };
+
+        let mut dirs: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.path())
+            .collect();
+
+        // Sort alphabetically
+        dirs.sort();
+
+        dirs
+    }
+
+    /// Get the current repository name from git.
+    fn get_current_repo_name(&self) -> Option<String> {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&self.startup_path)
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let repo_path = String::from_utf8(output.stdout).ok()?.trim().to_string();
+
+        std::path::Path::new(&repo_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
     }
 
     fn handle_list_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
@@ -826,16 +902,29 @@ impl TuiSessionManager {
 
         match bytes[0] {
             b'\r' | b'\n' => {
-                // Enter - confirm selection
-                if self.session_selector.is_selected_history() {
-                    // History item selected - try to resume, fallback to new session
-                    if let Some(selected) = self.session_selector.selected_original_index()
-                        && let Some((name, _)) = self.selector_sessions.get(selected).cloned()
-                    {
-                        self.start_history_session(&name)?;
+                // Enter - confirm selection based on item kind
+                match self.session_selector.selected_kind() {
+                    Some(SelectorItemKind::Live) => {
+                        // Live session - already previewed, just close
                     }
+                    Some(SelectorItemKind::Recent) => {
+                        // Recent session - resume it
+                        if let Some(selected) = self.session_selector.selected_original_index()
+                            && let Some((name, path_display)) = self.selector_sessions.get(selected).cloned()
+                        {
+                            self.resume_recent_session(&name, &path_display)?;
+                        }
+                    }
+                    Some(SelectorItemKind::Worktree) => {
+                        // Worktree directory - start fresh session
+                        if let Some(selected) = self.session_selector.selected_original_index()
+                            && let Some((_, path_display)) = self.selector_sessions.get(selected).cloned()
+                        {
+                            self.start_worktree_session(&path_display)?;
+                        }
+                    }
+                    None => {}
                 }
-                // For live sessions, we already previewed it, just close
                 self.mode = UiMode::Normal;
             }
             0x7f => {
@@ -857,10 +946,10 @@ impl TuiSessionManager {
     }
 
     /// Preview the currently selected session (switch to it without closing selector).
-    /// Only previews live sessions, not history items.
+    /// Only previews live sessions, not recent or worktree items.
     fn preview_selected_session(&mut self) -> anyhow::Result<()> {
-        // Don't preview history items - they're not live sessions
-        if self.session_selector.is_selected_history() {
+        // Only preview live sessions
+        if self.session_selector.selected_kind() != Some(SelectorItemKind::Live) {
             return Ok(());
         }
 
@@ -873,45 +962,79 @@ impl TuiSessionManager {
         Ok(())
     }
 
-    /// Start a session from history - try to resume with --continue, fallback to new session.
-    fn start_history_session(&mut self, name: &str) -> anyhow::Result<()> {
-        let entry = match self.history.get_by_name(name) {
-            Some(e) => e.clone(),
-            None => return Ok(()),
+    /// Resume a recent session from history.
+    fn resume_recent_session(&mut self, name: &str, path_display: &str) -> anyhow::Result<()> {
+        // Convert display path back to actual path
+        let path = if path_display.starts_with("~/") {
+            if let Some(home) = dirs::home_dir() {
+                home.join(&path_display[2..])
+            } else {
+                PathBuf::from(path_display)
+            }
+        } else {
+            PathBuf::from(path_display)
         };
 
         // Check if path still exists
-        if !entry.path.exists() {
+        if !path.exists() {
             let _ = self.status_tx.send(StatusMessage::err(
                 "Path not found",
-                format!("Session path no longer exists: {}", entry.path.display()),
+                format!("Session path no longer exists: {}", path.display()),
             ));
             return Ok(());
         }
 
-        // Try to resume with --continue first
-        let mut resume_args: Vec<String> = vec!["--continue".to_string()];
-        resume_args.extend(self.config.claude_args.clone());
-        let args: Vec<&str> = resume_args.iter().map(|s| s.as_str()).collect();
+        // Resume with --continue flag
+        let mut args_owned: Vec<String> = vec!["--continue".to_string()];
+        args_owned.extend(self.config.claude_args.clone());
+        let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+        self.add_claude_session(name, "claude", &args, &path, true)?;
 
-        match self.add_claude_session(&entry.name, "claude", &args, &entry.path, true) {
-            Ok(()) => {
-                let _ = self.status_tx.send(StatusMessage::info(
-                    "Resumed session",
-                    format!("Resumed '{}' from history", entry.name),
-                ));
+        let _ = self.status_tx.send(StatusMessage::info(
+            "Resumed session",
+            format!("Resumed '{}' from history", name),
+        ));
+
+        Ok(())
+    }
+
+    /// Start a new session in a worktree directory.
+    fn start_worktree_session(&mut self, path_display: &str) -> anyhow::Result<()> {
+        // Convert display path back to actual path
+        let path = if path_display.starts_with("~/") {
+            if let Some(home) = dirs::home_dir() {
+                home.join(&path_display[2..])
+            } else {
+                PathBuf::from(path_display)
             }
-            Err(_) => {
-                // Resume failed, start fresh session
-                let fresh_args_owned = self.config.claude_args.clone();
-                let fresh_args: Vec<&str> = fresh_args_owned.iter().map(|s| s.as_str()).collect();
-                self.add_claude_session(&entry.name, "claude", &fresh_args, &entry.path, false)?;
-                let _ = self.status_tx.send(StatusMessage::info(
-                    "New session",
-                    format!("Started fresh session '{}' (resume failed)", entry.name),
-                ));
-            }
+        } else {
+            PathBuf::from(path_display)
+        };
+
+        // Check if path still exists
+        if !path.exists() {
+            let _ = self.status_tx.send(StatusMessage::err(
+                "Path not found",
+                format!("Directory no longer exists: {}", path.display()),
+            ));
+            return Ok(());
         }
+
+        // Get the directory name as the session name
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unnamed".to_string());
+
+        // Start a new session (no --continue flag)
+        let args_owned = self.config.claude_args.clone();
+        let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+        self.add_claude_session(&name, "claude", &args, &path, false)?;
+
+        let _ = self.status_tx.send(StatusMessage::info(
+            "New session",
+            format!("Started session '{}' in {}", name, path.display()),
+        ));
 
         Ok(())
     }
@@ -933,17 +1056,12 @@ impl TuiSessionManager {
 
         if let Some(idx) = bg_index {
             let bg_pair = self.background.remove(idx);
-            let path = bg_pair.path.clone();
 
             if let Some(old_pair) = self.active.take() {
                 self.background.push(old_pair.detach());
             }
 
             self.active = Some(bg_pair.attach()?);
-
-            // Update history and save immediately
-            self.history.touch(name.to_string(), path);
-            let _ = self.history.save();
 
             return Ok(true);
         }
@@ -989,9 +1107,6 @@ impl TuiSessionManager {
 
 impl Drop for TuiSessionManager {
     fn drop(&mut self) {
-        // Save history before cleanup
-        let _ = self.history.save();
-
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
     }

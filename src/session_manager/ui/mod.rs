@@ -10,6 +10,6 @@ pub use create_dialog::CreateDialog;
 pub use help_popup::HelpPopup;
 pub use kill_confirm::KillConfirmDialog;
 pub use main_view::MainView;
-pub use session_selector::SessionSelector;
+pub use session_selector::{SelectorItemKind, SessionSelector};
 pub use status_bar::{StatusBar, StatusMessage};
 pub use terminal_multiplexer::TerminalMultiplexer;

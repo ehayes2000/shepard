@@ -110,7 +110,9 @@ impl TerminalMultiplexer {
 
     fn render_hotkey_bar(&self, frame: &mut Frame, area: Rect) {
         let hotkeys = Line::from(vec![
-            Span::styled(" ^\\", Style::default().fg(Color::Magenta)),
+            Span::styled(" Esc", Style::default().fg(Color::Magenta)),
+            Span::raw(" Claude  "),
+            Span::styled("^\\", Style::default().fg(Color::Magenta)),
             Span::raw(" Split  "),
             Span::styled("^W", Style::default().fg(Color::Magenta)),
             Span::raw(" Close  "),

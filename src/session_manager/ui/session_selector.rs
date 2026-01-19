@@ -6,6 +6,17 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
+/// Categories of items in the session selector
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectorItemKind {
+    /// A live session (can be previewed/switched to)
+    Live,
+    /// A recent session from history (should be resumed)
+    Recent,
+    /// A worktree directory (start fresh session)
+    Worktree,
+}
+
 /// A filterable session selector with incremental search.
 pub struct SessionSelector {
     /// The current filter query
@@ -16,8 +27,10 @@ pub struct SessionSelector {
     filtered_indices: Vec<usize>,
     /// Index of the active session (highlighted green)
     active_index: Option<usize>,
-    /// Number of live sessions (indices >= this are history items)
+    /// Number of live sessions
     live_count: usize,
+    /// Number of recent sessions (after live, before worktrees)
+    recent_count: usize,
 }
 
 impl SessionSelector {
@@ -30,6 +43,7 @@ impl SessionSelector {
             filtered_indices: Vec::new(),
             active_index: None,
             live_count: 0,
+            recent_count: 0,
         }
     }
 
@@ -39,6 +53,7 @@ impl SessionSelector {
         self.filtered_indices.clear();
         self.state.select(Some(0));
         self.live_count = 0;
+        self.recent_count = 0;
     }
 
     /// Set the index of the active session (will be highlighted green).
@@ -46,9 +61,10 @@ impl SessionSelector {
         self.active_index = index;
     }
 
-    /// Set the number of live sessions (indices >= this are history items).
-    pub fn set_live_count(&mut self, count: usize) {
-        self.live_count = count;
+    /// Set the counts for different item categories.
+    pub fn set_counts(&mut self, live_count: usize, recent_count: usize) {
+        self.live_count = live_count;
+        self.recent_count = recent_count;
     }
 
     /// Add a character to the query and update the filter.
@@ -68,11 +84,21 @@ impl SessionSelector {
         self.filtered_indices.get(selected).copied()
     }
 
-    /// Check if the currently selected item is a history (dead) session.
-    pub fn is_selected_history(&self) -> bool {
-        self.selected_original_index()
-            .map(|i| i >= self.live_count)
-            .unwrap_or(false)
+    /// Get the kind of the currently selected item.
+    pub fn selected_kind(&self) -> Option<SelectorItemKind> {
+        let idx = self.selected_original_index()?;
+        Some(self.item_kind(idx))
+    }
+
+    /// Determine the kind of item at a given index.
+    fn item_kind(&self, idx: usize) -> SelectorItemKind {
+        if idx < self.live_count {
+            SelectorItemKind::Live
+        } else if idx < self.live_count + self.recent_count {
+            SelectorItemKind::Recent
+        } else {
+            SelectorItemKind::Worktree
+        }
     }
 
     /// Move selection up in the filtered list.
@@ -135,21 +161,26 @@ impl SessionSelector {
 
     /// Render the session selector.
     /// `sessions` is a slice of (name, path) tuples.
+    /// For worktree directories, name is empty and only path is shown.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, sessions: &[(String, String)]) {
         // Calculate popup dimensions
         let max_name_len = sessions
             .iter()
             .map(|(name, _)| name.len())
             .max()
-            .unwrap_or(10);
+            .unwrap_or(0);
         let max_path_len = sessions
             .iter()
             .map(|(_, path)| path.len())
             .max()
             .unwrap_or(10);
 
-        // Width: name + separator + path + padding + borders
-        let content_width = max_name_len + 3 + max_path_len + 4;
+        // Width: name + separator + path + padding + borders (or just path for worktrees)
+        let content_width = if max_name_len > 0 {
+            max_name_len + 3 + max_path_len + 4
+        } else {
+            max_path_len + 4
+        };
         let popup_width = content_width.max(30).min(area.width as usize - 4) as u16;
 
         // Height: input box (3) + list items + borders
@@ -187,15 +218,29 @@ impl SessionSelector {
         frame.render_widget(input, input_area);
 
         // Build filtered list items
-        let live_count = self.live_count;
         let items: Vec<ListItem> = self
             .filtered_indices
             .iter()
             .map(|&i| {
                 let (name, path) = &sessions[i];
                 let is_active = self.active_index == Some(i);
-                let is_history = i >= live_count;
+                let kind = self.item_kind(i);
                 let available_width = (popup_width as usize).saturating_sub(4);
+
+                // For worktree directories (empty name), show only the path
+                if name.is_empty() {
+                    let path_display = if path.len() > available_width {
+                        format!("...{}", &path[path.len().saturating_sub(available_width - 3)..])
+                    } else {
+                        path.clone()
+                    };
+
+                    let path_style = Style::default().fg(Color::DarkGray);
+
+                    return Line::from(vec![Span::styled(path_display, path_style)]);
+                }
+
+                // For live/recent sessions, show name and path
                 let path_width = available_width.saturating_sub(name.len() + 3);
 
                 let path_display = if path.len() > path_width {
@@ -208,16 +253,16 @@ impl SessionSelector {
                     .saturating_sub(name.len())
                     .saturating_sub(path_display.len());
 
-                // Active session: green, history: dark gray, normal: white
+                // Active session: green, recent: dark gray, normal live: white
                 let name_style = if is_active {
                     Style::default().fg(Color::Green)
-                } else if is_history {
+                } else if kind == SelectorItemKind::Recent {
                     Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default().fg(Color::White)
                 };
 
-                let path_style = if is_history {
+                let path_style = if kind == SelectorItemKind::Recent {
                     Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default().fg(Color::Gray)
@@ -246,5 +291,11 @@ impl SessionSelector {
             .highlight_symbol("> ");
 
         frame.render_stateful_widget(list, list_area, &mut self.state);
+    }
+}
+
+impl Default for SessionSelector {
+    fn default() -> Self {
+        Self::new()
     }
 }
