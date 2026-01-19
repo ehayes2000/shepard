@@ -2,7 +2,9 @@ mod session_pair;
 mod ui;
 
 pub use ui::StatusMessage;
-use ui::{CreateDialog, HelpPopup, KillConfirmDialog, MainView, SessionSelector, StatusBar};
+use ui::{CreateDialog, HelpPopup, KillConfirmDialog, MainView, SessionSelector, StatusBar, TerminalMultiplexer};
+
+use std::collections::HashMap;
 
 use crossterm::ExecutableCommand;
 use crossterm::terminal::{
@@ -38,6 +40,8 @@ const CTRL_T: u8 = 0x14;
 const CTRL_N: u8 = 0x0E;
 const CTRL_L: u8 = 0x0C;
 const CTRL_X: u8 = 0x18;
+const CTRL_BACKSLASH: u8 = 0x1c;
+const CTRL_W: u8 = 0x17;
 
 #[derive(Default, Clone, PartialEq)]
 enum UiMode {
@@ -76,6 +80,8 @@ pub struct TuiSessionManager {
     selector_live_count: usize,
     /// Session history for recently used sessions
     history: SessionHistory,
+    /// Terminal multiplexers keyed by session name (persists across view switches)
+    multiplexers: HashMap<String, TerminalMultiplexer>,
 }
 
 impl TuiSessionManager {
@@ -136,6 +142,7 @@ impl TuiSessionManager {
             selector_sessions: Vec::new(),
             selector_live_count: 0,
             history,
+            multiplexers: HashMap::new(),
         })
     }
 
@@ -261,36 +268,20 @@ impl TuiSessionManager {
 
     /// Check if the active session has died and handle cleanup
     fn check_dead_sessions(&mut self) {
-        // Collect info about dead session before taking ownership
+        // First, clean up dead panes in multiplexers
+        self.cleanup_dead_multiplexer_panes();
+
+        // Collect info about dead claude session
         let dead_session_info = if let Some(ref pair) = self.active {
-            // Check if the currently viewed session is dead
-            let viewed_dead = match pair.view {
-                SessionView::Claude => pair.claude.is_dead(),
-                SessionView::Shell => pair.shell.as_ref().map(|s| s.is_dead()).unwrap_or(false),
-            };
-
-            if viewed_dead {
-                // Get error message from the dead session
-                let error = match pair.view {
-                    SessionView::Claude => pair.claude.get_error(),
-                    SessionView::Shell => pair.shell.as_ref().and_then(|s| s.get_error()),
-                };
-
-                let session_name = pair.name.clone();
-                let session_path = pair.path.clone();
-                let was_resumed = pair.resumed;
-                let view_name = match pair.view {
-                    SessionView::Claude => "claude",
-                    SessionView::Shell => "shell",
-                };
-
+            // Only check claude session death when in Claude view
+            if pair.view == SessionView::Claude && pair.claude.is_dead() {
+                let error = pair.claude.get_error();
                 let log_msg = error.unwrap_or_else(|| "Process exited".to_string());
                 let _ = self.status_tx.send(StatusMessage::err(
-                    format!("Session {} ({}) died", session_name, view_name),
+                    format!("Session {} (claude) died", pair.name),
                     log_msg,
                 ));
-
-                Some((session_name, session_path, was_resumed))
+                Some((pair.name.clone(), pair.path.clone(), pair.resumed))
             } else {
                 None
             }
@@ -302,8 +293,16 @@ impl TuiSessionManager {
             // Shutdown and remove the active session
             if let Some(pair) = self.active.take() {
                 pair.claude.shutdown();
-                if let Some(ref shell) = pair.shell {
-                    shell.shutdown();
+            }
+
+            // Also cleanup the multiplexer for this session
+            if let Some(mut multiplexer) = self.multiplexers.remove(&name) {
+                for pane in multiplexer.remove_dead_panes() {
+                    pane.shutdown();
+                }
+                // Shutdown any remaining live panes
+                while let Some(pane) = multiplexer.close_active_pane() {
+                    pane.shutdown();
                 }
             }
 
@@ -332,8 +331,64 @@ impl TuiSessionManager {
         }
     }
 
+    /// Clean up dead panes in multiplexers and switch view if needed
+    fn cleanup_dead_multiplexer_panes(&mut self) {
+        let Some(ref mut pair) = self.active else {
+            return;
+        };
+
+        if pair.view != SessionView::Shell {
+            return;
+        }
+
+        let name = pair.name.clone();
+
+        if let Some(multiplexer) = self.multiplexers.get_mut(&name) {
+            // Remove and shutdown dead panes
+            for dead_pane in multiplexer.remove_dead_panes() {
+                dead_pane.shutdown();
+            }
+
+            // If all panes are gone, switch back to Claude view
+            if multiplexer.is_empty() {
+                pair.view = SessionView::Claude;
+            }
+        }
+    }
+
     /// Handle global hotkeys. Returns true if a hotkey was processed.
     fn handle_hotkey(&mut self, bytes: &[u8]) -> anyhow::Result<bool> {
+        // Check if we're in shell view (for shell-specific hotkeys)
+        let in_shell_view = self
+            .active
+            .as_ref()
+            .map(|p| p.view == SessionView::Shell)
+            .unwrap_or(false);
+
+        // Handle shell-specific hotkeys first (only in Normal mode and Shell view)
+        if self.mode == UiMode::Normal && in_shell_view {
+            match bytes {
+                [b] if *b == CTRL_BACKSLASH => {
+                    self.split_shell_pane()?;
+                    return Ok(true);
+                }
+                [b] if *b == CTRL_W => {
+                    self.close_shell_pane();
+                    return Ok(true);
+                }
+                [b] if *b == CTRL_H => {
+                    self.focus_shell_pane_left();
+                    return Ok(true);
+                }
+                [b] if *b == CTRL_L => {
+                    self.focus_shell_pane_right();
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        // Handle global hotkeys
         let hotkey = match bytes {
             [b] if *b == CTRL_H => CTRL_H,
             [b] if *b == CTRL_T => CTRL_T,
@@ -397,14 +452,11 @@ impl TuiSessionManager {
         let (screen, active_view) = match &self.active {
             Some(pair) => {
                 let screen = match pair.view {
-                    SessionView::Claude => pair.claude.get_screen(),
-                    SessionView::Shell => pair
-                        .shell
-                        .as_ref()
-                        .map(|s| s.get_screen())
-                        .unwrap_or_else(|| pair.claude.get_screen()),
+                    SessionView::Claude => Some(pair.claude.get_screen()),
+                    // For shell view, we'll render the multiplexer instead
+                    SessionView::Shell => None,
                 };
-                (Some(screen), pair.view)
+                (screen, pair.view)
             }
             None => (None, SessionView::Claude),
         };
@@ -419,11 +471,18 @@ impl TuiSessionManager {
 
         let mut inner_area = ratatui::layout::Rect::default();
 
+        // Get multiplexer for shell view rendering (if in shell view)
+        let multiplexer_name = if active_view == SessionView::Shell {
+            active_name.clone()
+        } else {
+            None
+        };
+
         self.terminal.draw(|frame| {
             let area = frame.area();
 
-            // Render main view
-            inner_area = self.main_view.render(
+            // Render main view (frame/borders)
+            let main_inner = self.main_view.render(
                 frame,
                 screen.as_ref(),
                 active_name.as_deref(),
@@ -433,6 +492,17 @@ impl TuiSessionManager {
                 bottom_left,
                 bottom_center,
             );
+
+            // If in shell view, render the multiplexer inside the frame
+            if let Some(ref name) = multiplexer_name {
+                if let Some(multiplexer) = self.multiplexers.get(name) {
+                    inner_area = multiplexer.render(frame, main_inner);
+                } else {
+                    inner_area = main_inner;
+                }
+            } else {
+                inner_area = main_inner;
+            }
 
             // Render overlays based on mode
             match mode {
@@ -456,64 +526,156 @@ impl TuiSessionManager {
     }
 
     fn handle_normal_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-        if let Some(ref mut pair) = self.active {
-            // Check if session is dead before trying to write
-            let is_dead = match pair.view {
-                SessionView::Claude => pair.claude.is_dead(),
-                SessionView::Shell => pair.shell.as_ref().map(|s| s.is_dead()).unwrap_or(true),
-            };
+        let Some(ref pair) = self.active else {
+            return Ok(());
+        };
 
-            if is_dead {
-                // Session is dead, don't try to write - check_dead_sessions will clean up
-                return Ok(());
-            }
+        let name = pair.name.clone();
+        let view = pair.view;
 
-            // Try to write, but don't crash if it fails
-            let write_result = match pair.view {
-                SessionView::Claude => pair.claude.write_input(bytes),
-                SessionView::Shell => {
-                    if let Some(ref mut shell) = pair.shell {
-                        shell.write_input(bytes)
-                    } else {
-                        Ok(())
+        match view {
+            SessionView::Claude => {
+                if let Some(ref mut pair) = self.active {
+                    if pair.claude.is_dead() {
+                        return Ok(());
                     }
+                    // Ignore write errors - check_dead_sessions will handle cleanup
+                    let _ = pair.claude.write_input(bytes);
                 }
-            };
-
-            // If write failed, the session probably just died - ignore the error
-            // check_dead_sessions will handle cleanup on next iteration
-            if write_result.is_err() {
-                return Ok(());
+            }
+            SessionView::Shell => {
+                // Route input to the multiplexer's active pane
+                if let Some(multiplexer) = self.multiplexers.get_mut(&name)
+                    && let Some(pane) = multiplexer.active_pane_mut()
+                {
+                    if pane.is_dead() {
+                        return Ok(());
+                    }
+                    // Ignore write errors - check_dead_sessions will handle cleanup
+                    let _ = pane.write_input(bytes);
+                }
             }
         }
         Ok(())
     }
 
     fn toggle_shell(&mut self) -> anyhow::Result<()> {
-        let needs_shell = self
-            .active
-            .as_ref()
-            .map(|p| p.view == SessionView::Claude && p.shell.is_none())
-            .unwrap_or(false);
+        // Get info about current state without holding any borrows
+        let (name, path, current_view) = match &self.active {
+            Some(pair) => (pair.name.clone(), pair.path.clone(), pair.view),
+            None => return Ok(()),
+        };
 
-        let path = self.active.as_ref().map(|p| p.path.clone());
+        match current_view {
+            SessionView::Claude => {
+                // Check if multiplexer needs a pane
+                let needs_pane = self
+                    .multiplexers
+                    .get(&name)
+                    .map(|m| m.is_empty())
+                    .unwrap_or(true);
 
-        if needs_shell
-            && let Some(path) = path {
-                let shell_cmd = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                let shell_session = self.create_session(&shell_cmd, &[], &path)?;
+                if needs_pane {
+                    // Create session first (no borrows held)
+                    let shell_cmd = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                    let shell_session = self.create_session(&shell_cmd, &[], &path)?;
+
+                    // Then add to multiplexer
+                    self.multiplexers
+                        .entry(name)
+                        .or_default()
+                        .add_pane(shell_session);
+                }
+
+                // Now switch the view
                 if let Some(ref mut pair) = self.active {
-                    pair.shell = Some(shell_session);
+                    pair.view = SessionView::Shell;
                 }
             }
-
-        if let Some(ref mut pair) = self.active {
-            match pair.view {
-                SessionView::Claude => pair.view = SessionView::Shell,
-                SessionView::Shell => pair.view = SessionView::Claude,
+            SessionView::Shell => {
+                if let Some(ref mut pair) = self.active {
+                    pair.view = SessionView::Claude;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Split the current shell pane (add a new pane to the multiplexer)
+    fn split_shell_pane(&mut self) -> anyhow::Result<()> {
+        let Some(ref pair) = self.active else {
+            return Ok(());
+        };
+
+        if pair.view != SessionView::Shell {
+            return Ok(());
+        }
+
+        let name = pair.name.clone();
+        let path = pair.path.clone();
+
+        let shell_cmd = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let shell_session = self.create_session(&shell_cmd, &[], &path)?;
+
+        if let Some(multiplexer) = self.multiplexers.get_mut(&name) {
+            multiplexer.add_pane(shell_session);
+        }
+
+        Ok(())
+    }
+
+    /// Close the active shell pane (return to Claude view if no panes left)
+    fn close_shell_pane(&mut self) {
+        let Some(ref mut pair) = self.active else {
+            return;
+        };
+
+        if pair.view != SessionView::Shell {
+            return;
+        }
+
+        let name = pair.name.clone();
+
+        if let Some(multiplexer) = self.multiplexers.get_mut(&name) {
+            if let Some(closed) = multiplexer.close_active_pane() {
+                closed.shutdown();
+            }
+
+            // If no panes left, switch back to Claude view
+            if multiplexer.is_empty() {
+                pair.view = SessionView::Claude;
+            }
+        }
+    }
+
+    /// Focus the pane to the left
+    fn focus_shell_pane_left(&mut self) {
+        let Some(ref pair) = self.active else {
+            return;
+        };
+
+        if pair.view != SessionView::Shell {
+            return;
+        }
+
+        if let Some(multiplexer) = self.multiplexers.get_mut(&pair.name) {
+            multiplexer.focus_left();
+        }
+    }
+
+    /// Focus the pane to the right
+    fn focus_shell_pane_right(&mut self) {
+        let Some(ref pair) = self.active else {
+            return;
+        };
+
+        if pair.view != SessionView::Shell {
+            return;
+        }
+
+        if let Some(multiplexer) = self.multiplexers.get_mut(&pair.name) {
+            multiplexer.focus_right();
+        }
     }
 
     fn handle_help_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
@@ -539,9 +701,18 @@ impl TuiSessionManager {
                 if let Some(pair) = self.active.take() {
                     let name = pair.name.clone();
                     pair.claude.shutdown();
-                    if let Some(ref shell) = pair.shell {
-                        shell.shutdown();
+
+                    // Also cleanup the multiplexer for this session
+                    if let Some(mut multiplexer) = self.multiplexers.remove(&name) {
+                        for pane in multiplexer.remove_dead_panes() {
+                            pane.shutdown();
+                        }
+                        // Shutdown any remaining live panes
+                        while let Some(pane) = multiplexer.close_active_pane() {
+                            pane.shutdown();
+                        }
                     }
+
                     let _ = self.status_tx.send(StatusMessage::info(
                         "Session killed",
                         format!("Killed session '{}'", name),

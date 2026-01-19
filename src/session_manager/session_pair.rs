@@ -10,13 +10,13 @@ pub enum SessionView {
     Shell,
 }
 
-/// An active session pair - both claude and shell are attached (can receive input)
+/// An active session pair - claude session is attached (can receive input)
+/// Shell sessions are managed separately in TerminalMultiplexer
 pub struct ActivePair {
     pub name: String,
     pub path: PathBuf,
     pub view: SessionView,
     pub claude: AttachedSession,
-    pub shell: Option<AttachedSession>,
     /// Whether this session was started via resume (--continue flag)
     pub resumed: bool,
 }
@@ -33,7 +33,6 @@ impl ActivePair {
             path,
             view: SessionView::Claude,
             claude,
-            shell: None,
             resumed,
         }
     }
@@ -44,19 +43,18 @@ impl ActivePair {
             path: self.path,
             last_view: self.view,
             claude: self.claude.detach(),
-            shell: self.shell.map(|s| s.detach()),
             resumed: self.resumed,
         }
     }
 }
 
-/// A background session pair - both sessions are detached
+/// A background session pair - claude session is detached
+/// Shell sessions are managed separately in TerminalMultiplexer
 pub struct BackgroundPair {
     pub name: String,
     pub path: PathBuf,
     pub last_view: SessionView,
     pub claude: DetachedSession,
-    pub shell: Option<DetachedSession>,
     /// Whether this session was started via resume (--continue flag)
     pub resumed: bool,
 }
@@ -68,7 +66,6 @@ impl BackgroundPair {
             path: self.path,
             view: self.last_view,
             claude: self.claude.attach()?,
-            shell: self.shell.map(|s| s.attach()).transpose()?,
             resumed: self.resumed,
         })
     }
