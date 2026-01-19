@@ -146,10 +146,10 @@ impl Session {
     /// Get the current screen state (clones only if dirty)
     pub fn get_screen(&self) -> Arc<Screen> {
         // Only clone the screen if it's been modified since last read
-        if self.dirty.swap(false, Ordering::AcqRel) {
-            if let Ok(parser) = self.parser.lock() {
-                self.cached_screen.store(Arc::new(parser.screen().clone()));
-            }
+        if self.dirty.swap(false, Ordering::AcqRel)
+            && let Ok(parser) = self.parser.lock()
+        {
+            self.cached_screen.store(Arc::new(parser.screen().clone()));
         }
         self.cached_screen.load_full()
     }
