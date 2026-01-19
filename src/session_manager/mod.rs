@@ -60,6 +60,7 @@ const CTRL_BACKSLASH: u8 = 0x1c;
 const CTRL_W: u8 = 0x17;
 const CTRL_D: u8 = 0x04;
 const CTRL_K: u8 = 0x0B;
+const TAB: u8 = 0x09;
 
 #[derive(Default, Clone, PartialEq)]
 enum UiMode {
@@ -415,12 +416,8 @@ impl TuiSessionManager {
                     self.close_shell_pane();
                     return Ok(true);
                 }
-                [b] if *b == CTRL_H => {
-                    self.focus_shell_pane_left();
-                    return Ok(true);
-                }
-                [b] if *b == CTRL_L => {
-                    self.focus_shell_pane_right();
+                [b] if *b == TAB => {
+                    self.cycle_shell_pane();
                     return Ok(true);
                 }
                 _ => {}
@@ -703,14 +700,6 @@ impl TuiSessionManager {
             return Ok(());
         }
 
-        // Escape key - switch from shell back to Claude view
-        if bytes == [0x1b] && view == SessionView::Shell {
-            if let Some(ref mut pair) = self.active {
-                pair.view = SessionView::Claude;
-            }
-            return Ok(());
-        }
-
         // Any other input resets scroll to bottom
         if let Some(ref mut pair) = self.active {
             pair.scroll_offset = 0;
@@ -832,8 +821,7 @@ impl TuiSessionManager {
         }
     }
 
-    /// Focus the pane to the left
-    fn focus_shell_pane_left(&mut self) {
+    fn cycle_shell_pane(&mut self) {
         let Some(ref pair) = self.active else {
             return;
         };
@@ -843,22 +831,7 @@ impl TuiSessionManager {
         }
 
         if let Some(multiplexer) = self.multiplexers.get_mut(&pair.name) {
-            multiplexer.focus_left();
-        }
-    }
-
-    /// Focus the pane to the right
-    fn focus_shell_pane_right(&mut self) {
-        let Some(ref pair) = self.active else {
-            return;
-        };
-
-        if pair.view != SessionView::Shell {
-            return;
-        }
-
-        if let Some(multiplexer) = self.multiplexers.get_mut(&pair.name) {
-            multiplexer.focus_right();
+            multiplexer.cycle_pane();
         }
     }
 
