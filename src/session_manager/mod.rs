@@ -35,6 +35,17 @@ fn path_to_display(path: &Path) -> String {
         }
     path.display().to_string()
 }
+
+/// Convert a display path (possibly with `~/`) back to an actual path.
+fn display_path_to_actual(path_display: &str) -> PathBuf {
+    if let Some(suffix) = path_display.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(suffix);
+    }
+    PathBuf::from(path_display)
+}
+
 const CTRL_H: u8 = 0x08;
 const CTRL_T: u8 = 0x14;
 const CTRL_N: u8 = 0x0E;
@@ -965,15 +976,7 @@ impl TuiSessionManager {
     /// Resume a recent session from history.
     fn resume_recent_session(&mut self, name: &str, path_display: &str) -> anyhow::Result<()> {
         // Convert display path back to actual path
-        let path = if path_display.starts_with("~/") {
-            if let Some(home) = dirs::home_dir() {
-                home.join(&path_display[2..])
-            } else {
-                PathBuf::from(path_display)
-            }
-        } else {
-            PathBuf::from(path_display)
-        };
+        let path = display_path_to_actual(path_display);
 
         // Check if path still exists
         if !path.exists() {
@@ -1001,15 +1004,7 @@ impl TuiSessionManager {
     /// Start a new session in a worktree directory.
     fn start_worktree_session(&mut self, path_display: &str) -> anyhow::Result<()> {
         // Convert display path back to actual path
-        let path = if path_display.starts_with("~/") {
-            if let Some(home) = dirs::home_dir() {
-                home.join(&path_display[2..])
-            } else {
-                PathBuf::from(path_display)
-            }
-        } else {
-            PathBuf::from(path_display)
-        };
+        let path = display_path_to_actual(path_display);
 
         // Check if path still exists
         if !path.exists() {
