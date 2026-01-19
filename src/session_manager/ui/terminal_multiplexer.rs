@@ -185,7 +185,9 @@ impl TerminalMultiplexer {
                 let cursor_x = pane_area.x + cursor_col;
                 let cursor_y = pane_area.y + cursor_row;
                 // Only set cursor if it's within the visible area
-                if cursor_x < pane_area.x + pane_area.width && cursor_y < pane_area.y + pane_area.height {
+                if cursor_x < pane_area.x + pane_area.width
+                    && cursor_y < pane_area.y + pane_area.height
+                {
                     frame.set_cursor_position((cursor_x, cursor_y));
                 }
             }

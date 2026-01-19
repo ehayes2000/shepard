@@ -82,10 +82,20 @@ impl SessionHistory {
     }
 
     /// Get all recent sessions for a workspace (most recent first)
-    pub fn get_recent_sessions(&self, startup_path: &PathBuf) -> impl Iterator<Item = &RecentSession> {
+    pub fn get_recent_sessions(
+        &self,
+        startup_path: &PathBuf,
+    ) -> impl Iterator<Item = &RecentSession> {
         self.recent_sessions
             .get(startup_path)
             .into_iter()
             .flat_map(|sessions| sessions.iter())
+    }
+
+    /// Remove all sessions with the given path from all workspaces
+    pub fn remove_by_path(&mut self, path: &std::path::Path) {
+        for sessions in self.recent_sessions.values_mut() {
+            sessions.retain(|s| s.path != path);
+        }
     }
 }

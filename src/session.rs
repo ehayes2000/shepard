@@ -228,10 +228,7 @@ impl AttachedSession {
         // Create parser with callbacks - shared between reader thread and main thread
         let callbacks = TerminalCallbacks::new(callback_writer);
         let parser = Arc::new(Mutex::new(Parser::new_with_callbacks(
-            rows,
-            cols,
-            SCROLLBACK,
-            callbacks,
+            rows, cols, SCROLLBACK, callbacks,
         )));
         let shared_parser = parser.clone();
 
@@ -315,10 +312,7 @@ impl AttachedSession {
                         let kind = e.kind();
                         // EIO is expected when child process exits
                         if kind != std::io::ErrorKind::Other {
-                            shared_error.store(Arc::new(Some(format!(
-                                "PTY read error: {}",
-                                e
-                            ))));
+                            shared_error.store(Arc::new(Some(format!("PTY read error: {}", e))));
                         } else {
                             // EIO means process exited
                             shared_error.store(Arc::new(Some("Process exited".to_string())));

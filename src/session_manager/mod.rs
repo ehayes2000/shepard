@@ -2,7 +2,10 @@ mod session_pair;
 mod ui;
 
 pub use ui::StatusMessage;
-use ui::{CreateDialog, HelpPopup, KillConfirmDialog, MainView, SelectorItemKind, SessionSelector, StatusBar, TerminalMultiplexer};
+use ui::{
+    CreateDialog, DeleteConfirmDialog, HelpPopup, KillConfirmDialog, MainView, SelectorItemKind,
+    SessionSelector, StatusBar, TerminalMultiplexer, WorktreeCleanupDialog,
+};
 
 use std::collections::HashMap;
 
@@ -31,9 +34,10 @@ const BUF_SIZE: usize = 1024;
 /// Convert an absolute path to a home-relative path string with `~`.
 fn path_to_display(path: &Path) -> String {
     if let Some(home) = dirs::home_dir()
-        && let Ok(suffix) = path.strip_prefix(&home) {
-            return format!("~/{}", suffix.display());
-        }
+        && let Ok(suffix) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", suffix.display());
+    }
     path.display().to_string()
 }
 
@@ -55,6 +59,7 @@ const CTRL_X: u8 = 0x18;
 const CTRL_BACKSLASH: u8 = 0x1c;
 const CTRL_W: u8 = 0x17;
 const CTRL_D: u8 = 0x04;
+const CTRL_K: u8 = 0x0B;
 
 #[derive(Default, Clone, PartialEq)]
 enum UiMode {
@@ -64,6 +69,8 @@ enum UiMode {
     ListSessions,
     NewSession,
     KillConfirmation,
+    WorktreeCleanup,
+    WorktreeDeleteConfirm,
 }
 
 pub struct TuiSessionManager {
@@ -83,6 +90,8 @@ pub struct TuiSessionManager {
     session_selector: SessionSelector,
     create_dialog: CreateDialog,
     kill_confirm_dialog: KillConfirmDialog,
+    worktree_cleanup_dialog: WorktreeCleanupDialog,
+    delete_confirm_dialog: DeleteConfirmDialog,
     status_bar: StatusBar,
     status_tx: Sender<StatusMessage>,
     /// Original active session name when selector opened (for revert on escape)
@@ -154,6 +163,8 @@ impl TuiSessionManager {
             session_selector: SessionSelector::new(),
             create_dialog: CreateDialog::new(),
             kill_confirm_dialog: KillConfirmDialog::new(),
+            worktree_cleanup_dialog: WorktreeCleanupDialog::new(),
+            delete_confirm_dialog: DeleteConfirmDialog::new(),
             status_bar,
             status_tx,
             selector_original_session: None,
@@ -274,7 +285,15 @@ impl TuiSessionManager {
                             UiMode::HelpPopup => self.handle_help_input(&bytes)?,
                             UiMode::ListSessions => self.handle_list_input(&bytes)?,
                             UiMode::NewSession => self.handle_new_session_input(&bytes)?,
-                            UiMode::KillConfirmation => self.handle_kill_confirmation_input(&bytes)?,
+                            UiMode::KillConfirmation => {
+                                self.handle_kill_confirmation_input(&bytes)?
+                            }
+                            UiMode::WorktreeCleanup => {
+                                self.handle_worktree_cleanup_input(&bytes)?
+                            }
+                            UiMode::WorktreeDeleteConfirm => {
+                                self.handle_delete_confirm_input(&bytes)?
+                            }
                         }
                     }
                 }
@@ -416,6 +435,7 @@ impl TuiSessionManager {
             [b] if *b == CTRL_L => CTRL_L,
             [b] if *b == CTRL_X => CTRL_X,
             [b] if *b == CTRL_D => CTRL_D,
+            [b] if *b == CTRL_K => CTRL_K,
             _ => return Ok(false),
         };
 
@@ -460,6 +480,14 @@ impl TuiSessionManager {
             }
             CTRL_D => {
                 self.should_quit = true;
+            }
+            CTRL_K => {
+                if self.mode == UiMode::WorktreeCleanup {
+                    self.mode = UiMode::Normal;
+                } else {
+                    self.open_worktree_cleanup();
+                    self.mode = UiMode::WorktreeCleanup;
+                }
             }
             _ => return Ok(false),
         }
@@ -534,13 +562,20 @@ impl TuiSessionManager {
                     self.help_popup.render(frame, area);
                 }
                 UiMode::ListSessions => {
-                    self.session_selector.render(frame, area, &self.selector_sessions);
+                    self.session_selector
+                        .render(frame, area, &self.selector_sessions);
                 }
                 UiMode::NewSession => {
                     self.create_dialog.render(frame, area);
                 }
                 UiMode::KillConfirmation => {
                     self.kill_confirm_dialog.render(frame, area);
+                }
+                UiMode::WorktreeCleanup => {
+                    self.worktree_cleanup_dialog.render(frame, area);
+                }
+                UiMode::WorktreeDeleteConfirm => {
+                    self.delete_confirm_dialog.render(frame, area);
                 }
             }
         })?;
@@ -725,7 +760,8 @@ impl TuiSessionManager {
 
                 if needs_pane {
                     // Create session first (no borrows held)
-                    let shell_cmd = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                    let shell_cmd =
+                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                     let shell_session = self.create_session(&shell_cmd, &[], &path)?;
 
                     // Then add to multiplexer
@@ -902,7 +938,8 @@ impl TuiSessionManager {
     /// Returns (list, live_count, recent_count).
     fn build_session_list(&self) -> (Vec<(String, String)>, usize, usize) {
         // Collect live sessions first
-        let live: Vec<(String, String)> = self.active
+        let live: Vec<(String, String)> = self
+            .active
             .iter()
             .map(|p| (p.name.clone(), path_to_display(&p.path)))
             .chain(
@@ -915,14 +952,16 @@ impl TuiSessionManager {
         let live_count = live.len();
 
         // Collect paths that are currently live (to filter out from recent/worktrees)
-        let live_paths: std::collections::HashSet<_> = self.active
+        let live_paths: std::collections::HashSet<_> = self
+            .active
             .iter()
             .map(|p| p.path.clone())
             .chain(self.background.iter().map(|p| p.path.clone()))
             .collect();
 
         // Collect recent sessions from history that aren't currently live
-        let recent_items: Vec<(String, String)> = self.history
+        let recent_items: Vec<(String, String)> = self
+            .history
             .get_recent_sessions(&self.startup_path)
             .filter(|s| !live_paths.contains(&s.path))
             .map(|s| (s.name.clone(), path_to_display(&s.path)))
@@ -931,12 +970,14 @@ impl TuiSessionManager {
         let recent_count = recent_items.len();
 
         // Collect worktree directories that aren't currently live or recent
-        let recent_paths: std::collections::HashSet<_> = self.history
+        let recent_paths: std::collections::HashSet<_> = self
+            .history
             .get_recent_sessions(&self.startup_path)
             .map(|s| s.path.clone())
             .collect();
 
-        let worktree_items: Vec<(String, String)> = self.list_worktree_dirs()
+        let worktree_items: Vec<(String, String)> = self
+            .list_worktree_dirs()
             .into_iter()
             .filter(|path| !live_paths.contains(path) && !recent_paths.contains(path))
             .map(|path| (String::new(), path_to_display(&path)))
@@ -1041,7 +1082,8 @@ impl TuiSessionManager {
                     Some(SelectorItemKind::Recent) => {
                         // Recent session - resume it
                         if let Some(selected) = self.session_selector.selected_original_index()
-                            && let Some((name, path_display)) = self.selector_sessions.get(selected).cloned()
+                            && let Some((name, path_display)) =
+                                self.selector_sessions.get(selected).cloned()
                         {
                             self.resume_recent_session(&name, &path_display)?;
                         }
@@ -1049,7 +1091,8 @@ impl TuiSessionManager {
                     Some(SelectorItemKind::Worktree) => {
                         // Worktree directory - start fresh session
                         if let Some(selected) = self.session_selector.selected_original_index()
-                            && let Some((_, path_display)) = self.selector_sessions.get(selected).cloned()
+                            && let Some((_, path_display)) =
+                                self.selector_sessions.get(selected).cloned()
                         {
                             self.start_worktree_session(&path_display)?;
                         }
@@ -1159,15 +1202,13 @@ impl TuiSessionManager {
     fn switch_to_session_by_name(&mut self, name: &str) -> anyhow::Result<bool> {
         // Check if already active
         if let Some(ref active) = self.active
-            && active.name == name {
-                return Ok(true);
-            }
+            && active.name == name
+        {
+            return Ok(true);
+        }
 
         // Find in background
-        let bg_index = self
-            .background
-            .iter()
-            .position(|p| p.name == name);
+        let bg_index = self.background.iter().position(|p| p.name == name);
 
         if let Some(idx) = bg_index {
             let bg_pair = self.background.remove(idx);
@@ -1214,6 +1255,244 @@ impl TuiSessionManager {
                 self.create_dialog.push(b as char);
             }
             _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Open the worktree cleanup dialog
+    fn open_worktree_cleanup(&mut self) {
+        self.worktree_cleanup_dialog.reset();
+        let worktrees = self.list_worktree_dirs();
+        let active_paths = self.get_active_session_paths();
+        self.worktree_cleanup_dialog
+            .set_worktrees_with_active(worktrees, active_paths);
+    }
+
+    /// Get paths of all active/background sessions.
+    fn get_active_session_paths(&self) -> std::collections::HashSet<PathBuf> {
+        self.active
+            .iter()
+            .map(|p| p.path.clone())
+            .chain(self.background.iter().map(|p| p.path.clone()))
+            .collect()
+    }
+
+    /// Handle input in worktree cleanup mode
+    fn handle_worktree_cleanup_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        // Handle escape sequences (arrows, escape key)
+        if bytes[0] == 0x1b {
+            if bytes.len() == 1 {
+                // Escape - close dialog
+                self.mode = UiMode::Normal;
+                return Ok(());
+            }
+            if bytes.len() >= 3 && bytes[1] == b'[' {
+                match bytes[2] {
+                    b'A' => self.worktree_cleanup_dialog.move_up(),
+                    b'B' => self.worktree_cleanup_dialog.move_down(),
+                    _ => {}
+                }
+            }
+            return Ok(());
+        }
+
+        match bytes[0] {
+            b'\r' | b'\n' => {
+                // Enter - toggle selection
+                self.worktree_cleanup_dialog.toggle_selection();
+            }
+            b'd' => {
+                // Delete selected, or current item if nothing selected
+                let to_delete = if self.worktree_cleanup_dialog.has_selections() {
+                    self.worktree_cleanup_dialog.get_selected_worktrees()
+                } else {
+                    self.worktree_cleanup_dialog
+                        .get_current_worktree()
+                        .into_iter()
+                        .collect()
+                };
+                if !to_delete.is_empty() {
+                    let active_paths = self.get_active_session_paths();
+                    self.delete_confirm_dialog
+                        .set_worktrees_with_active(to_delete, active_paths);
+                    self.mode = UiMode::WorktreeDeleteConfirm;
+                }
+            }
+            0x7f => {
+                // Backspace - remove character from filter
+                self.worktree_cleanup_dialog.pop_char();
+                self.worktree_cleanup_dialog.update_filter();
+            }
+            b if b.is_ascii_graphic() || b == b' ' => {
+                // Printable character - add to filter
+                self.worktree_cleanup_dialog.push_char(b as char);
+                self.worktree_cleanup_dialog.update_filter();
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Handle input in delete confirmation mode
+    fn handle_delete_confirm_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        match bytes[0] {
+            0x1b if bytes.len() == 1 => {
+                // Escape - cancel, return to cleanup dialog
+                self.mode = UiMode::WorktreeCleanup;
+            }
+            b'y' | b'Y' => {
+                // Confirm - delete worktrees
+                self.delete_selected_worktrees()?;
+            }
+            b'n' | b'N' => {
+                // Cancel - return to cleanup dialog
+                self.mode = UiMode::WorktreeCleanup;
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Delete selected worktrees
+    fn delete_selected_worktrees(&mut self) -> anyhow::Result<()> {
+        let worktrees = self.delete_confirm_dialog.get_worktrees().to_vec();
+        let active_paths = self.delete_confirm_dialog.get_active_paths().clone();
+        let mut deleted_count = 0;
+        let mut errors = Vec::new();
+
+        // First, kill any active sessions for worktrees being deleted
+        for worktree_path in &worktrees {
+            if active_paths.contains(worktree_path) {
+                self.kill_session_at_path(worktree_path);
+            }
+        }
+
+        // Now delete the worktrees
+        for worktree_path in &worktrees {
+            match self.delete_worktree(worktree_path) {
+                Ok(()) => {
+                    deleted_count += 1;
+                    // Remove from history
+                    self.history.remove_by_path(worktree_path);
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", worktree_path.display(), e));
+                }
+            }
+        }
+
+        // Save history after all deletions
+        let _ = self.history.save();
+
+        // Show status message
+        if errors.is_empty() {
+            let _ = self.status_tx.send(StatusMessage::info(
+                format!("Deleted {} worktree(s)", deleted_count),
+                format!("Successfully deleted {} worktree(s)", deleted_count),
+            ));
+        } else {
+            let _ = self.status_tx.send(StatusMessage::err(
+                format!(
+                    "Deleted {} of {} worktree(s)",
+                    deleted_count,
+                    worktrees.len()
+                ),
+                errors.join("; "),
+            ));
+        }
+
+        // Refresh the worktree list
+        let remaining = self.list_worktree_dirs();
+        let active_paths = self.get_active_session_paths();
+        self.worktree_cleanup_dialog
+            .set_worktrees_with_active(remaining, active_paths);
+
+        // Return to cleanup mode if worktrees remain, otherwise normal
+        if self.worktree_cleanup_dialog.is_empty() {
+            self.mode = UiMode::Normal;
+        } else {
+            self.mode = UiMode::WorktreeCleanup;
+        }
+
+        Ok(())
+    }
+
+    /// Kill a session at the given path (active or background)
+    fn kill_session_at_path(&mut self, path: &Path) {
+        // Check if it's the active session
+        if let Some(ref pair) = self.active
+            && pair.path == path
+        {
+            if let Some(pair) = self.active.take() {
+                let name = pair.name.clone();
+                pair.claude.shutdown();
+
+                // Also cleanup the multiplexer for this session
+                if let Some(mut multiplexer) = self.multiplexers.remove(&name) {
+                    for pane in multiplexer.remove_dead_panes() {
+                        pane.shutdown();
+                    }
+                    while let Some(pane) = multiplexer.close_active_pane() {
+                        pane.shutdown();
+                    }
+                }
+            }
+            return;
+        }
+
+        // Check background sessions
+        if let Some(idx) = self.background.iter().position(|p| p.path == path) {
+            let bg_pair = self.background.remove(idx);
+            let name = bg_pair.name.clone();
+
+            // Cleanup the multiplexer for this session
+            if let Some(mut multiplexer) = self.multiplexers.remove(&name) {
+                for pane in multiplexer.remove_dead_panes() {
+                    pane.shutdown();
+                }
+                while let Some(pane) = multiplexer.close_active_pane() {
+                    pane.shutdown();
+                }
+            }
+
+            // Note: BackgroundPair doesn't have a shutdown method, but dropping it should clean up
+        }
+    }
+
+    /// Delete a single worktree (git worktree remove + directory cleanup)
+    fn delete_worktree(&self, worktree_path: &Path) -> anyhow::Result<()> {
+        let worktree_str = worktree_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
+
+        // First try git worktree remove
+        let output = std::process::Command::new("git")
+            .args(["worktree", "remove", worktree_str])
+            .current_dir(&self.startup_path)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "git worktree remove failed: {}",
+                stderr.trim()
+            ));
+        }
+
+        // If directory still exists (shouldn't normally), remove it
+        if worktree_path.exists() {
+            std::fs::remove_dir_all(worktree_path)?;
         }
 
         Ok(())

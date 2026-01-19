@@ -15,7 +15,11 @@ pub struct PtyWidget<'a> {
 
 impl<'a> PtyWidget<'a> {
     pub fn new(screen: &'a Screen) -> Self {
-        Self { screen, dimmed: false, scroll_offset: 0 }
+        Self {
+            screen,
+            dimmed: false,
+            scroll_offset: 0,
+        }
     }
 
     pub fn dimmed(mut self, dimmed: bool) -> Self {

@@ -230,7 +230,10 @@ impl SessionSelector {
                 // For worktree directories (empty name), show only the path
                 if name.is_empty() {
                     let path_display = if path.len() > available_width {
-                        format!("...{}", &path[path.len().saturating_sub(available_width - 3)..])
+                        format!(
+                            "...{}",
+                            &path[path.len().saturating_sub(available_width - 3)..]
+                        )
                     } else {
                         path.clone()
                     };
