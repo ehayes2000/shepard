@@ -205,7 +205,7 @@ impl SessionSelector {
                 Line::from(vec![
                     Span::styled(name.clone(), name_style),
                     Span::raw(" ".repeat(padding)),
-                    Span::styled(path_display, Style::default().fg(Color::DarkGray)),
+                    Span::styled(path_display, Style::default().fg(Color::Gray)),
                 ])
             })
             .map(ListItem::new)

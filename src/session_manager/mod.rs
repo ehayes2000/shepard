@@ -23,6 +23,16 @@ use std::sync::mpsc::Sender;
 use session_pair::{ActivePair, BackgroundPair, SessionView};
 
 const BUF_SIZE: usize = 1024;
+
+/// Convert an absolute path to a home-relative path string with `~`.
+fn path_to_display(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(suffix) = path.strip_prefix(&home) {
+            return format!("~/{}", suffix.display());
+        }
+    }
+    path.display().to_string()
+}
 const CTRL_H: u8 = 0x08;
 const CTRL_T: u8 = 0x14;
 const CTRL_N: u8 = 0x0E;
@@ -59,6 +69,10 @@ pub struct TuiSessionManager {
     create_dialog: CreateDialog,
     status_bar: StatusBar,
     status_tx: Sender<StatusMessage>,
+    /// Original active session name when selector opened (for revert on escape)
+    selector_original_session: Option<String>,
+    /// Cached session list when selector opened (indices stay consistent during preview)
+    selector_sessions: Vec<(String, String)>,
 }
 
 impl TuiSessionManager {
@@ -113,6 +127,8 @@ impl TuiSessionManager {
             create_dialog: CreateDialog::new(),
             status_bar,
             status_tx,
+            selector_original_session: None,
+            selector_sessions: Vec::new(),
         })
     }
 
@@ -248,18 +264,6 @@ impl TuiSessionManager {
         let background_count = self.background.len();
         let mode = self.mode.clone();
 
-        // Build full session list for selector: active first (if any), then background
-        let all_sessions: Vec<(String, String)> = self
-            .active
-            .iter()
-            .map(|p| (p.name.clone(), p.path.display().to_string()))
-            .chain(
-                self.background
-                    .iter()
-                    .map(|p| (p.name.clone(), p.path.display().to_string())),
-            )
-            .collect();
-
         // Get status bar render data
         let bottom_left = self.status_bar.render_bottom_left();
         let bottom_center = self.status_bar.render_bottom_center();
@@ -288,7 +292,7 @@ impl TuiSessionManager {
                     self.help_popup.render(frame, area);
                 }
                 UiMode::ListSessions => {
-                    self.session_selector.render(frame, area, &all_sessions);
+                    self.session_selector.render(frame, area, &self.selector_sessions);
                 }
                 UiMode::NewSession => {
                     self.create_dialog.render(frame, area);
@@ -385,24 +389,27 @@ impl TuiSessionManager {
     fn open_session_selector(&mut self) {
         self.session_selector.reset();
 
+        // Save original active session name for revert on escape
+        self.selector_original_session = self.active.as_ref().map(|p| p.name.clone());
+
         // Active session is at index 0 if it exists
         if self.active.is_some() {
             self.session_selector.set_active_index(Some(0));
         }
 
-        // Build session list and update filter
-        let sessions = self.build_session_list();
-        self.session_selector.update_filter(&sessions);
+        // Cache session list (indices remain consistent during preview)
+        self.selector_sessions = self.build_session_list();
+        self.session_selector.update_filter(&self.selector_sessions);
     }
 
     fn build_session_list(&self) -> Vec<(String, String)> {
         self.active
             .iter()
-            .map(|p| (p.name.clone(), p.path.display().to_string()))
+            .map(|p| (p.name.clone(), path_to_display(&p.path)))
             .chain(
                 self.background
                     .iter()
-                    .map(|p| (p.name.clone(), p.path.display().to_string())),
+                    .map(|p| (p.name.clone(), path_to_display(&p.path))),
             )
             .collect()
     }
@@ -415,14 +422,23 @@ impl TuiSessionManager {
         // Handle escape sequences (arrows, escape key)
         if bytes[0] == 0x1b {
             if bytes.len() == 1 {
-                // Escape key - close selector
+                // Escape key - revert to original session and close
+                if let Some(ref original_name) = self.selector_original_session.clone() {
+                    self.switch_to_session_by_name(original_name)?;
+                }
                 self.mode = UiMode::Normal;
                 return Ok(());
             }
             if bytes.len() >= 3 && bytes[1] == b'[' {
                 match bytes[2] {
-                    b'A' => self.session_selector.move_up(),   // Up arrow
-                    b'B' => self.session_selector.move_down(), // Down arrow
+                    b'A' => {
+                        self.session_selector.move_up();
+                        self.preview_selected_session()?;
+                    }
+                    b'B' => {
+                        self.session_selector.move_down();
+                        self.preview_selected_session()?;
+                    }
                     _ => {}
                 }
             }
@@ -431,25 +447,61 @@ impl TuiSessionManager {
 
         match bytes[0] {
             b'\r' | b'\n' => {
-                // Enter - select the session
-                if let Some(selected) = self.session_selector.selected_original_index() {
-                    self.switch_to_session(selected)?;
-                }
+                // Enter - keep current session (already previewed) and close
                 self.mode = UiMode::Normal;
             }
             0x7f => {
                 // Backspace - remove character from filter
                 self.session_selector.pop_char();
-                let sessions = self.build_session_list();
-                self.session_selector.update_filter(&sessions);
+                self.session_selector.update_filter(&self.selector_sessions);
+                self.preview_selected_session()?;
             }
             b if b.is_ascii_graphic() || b == b' ' => {
                 // Printable character - add to filter
                 self.session_selector.push_char(b as char);
-                let sessions = self.build_session_list();
-                self.session_selector.update_filter(&sessions);
+                self.session_selector.update_filter(&self.selector_sessions);
+                self.preview_selected_session()?;
             }
             _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Preview the currently selected session (switch to it without closing selector)
+    fn preview_selected_session(&mut self) -> anyhow::Result<()> {
+        if let Some(selected) = self.session_selector.selected_original_index() {
+            // Get the name from cached session list (indices are stable)
+            if let Some((name, _)) = self.selector_sessions.get(selected).cloned() {
+                self.switch_to_session_by_name(&name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Switch to a session by name, searching both active and background
+    fn switch_to_session_by_name(&mut self, name: &str) -> anyhow::Result<()> {
+        // Check if already active
+        if let Some(ref active) = self.active {
+            if active.name == name {
+                return Ok(());
+            }
+        }
+
+        // Find in background
+        let bg_index = self
+            .background
+            .iter()
+            .position(|p| p.name == name);
+
+        if let Some(idx) = bg_index {
+            let bg_pair = self.background.remove(idx);
+
+            if let Some(old_pair) = self.active.take() {
+                self.background.push(old_pair.detach());
+            }
+
+            self.active = Some(bg_pair.attach()?);
         }
 
         Ok(())
