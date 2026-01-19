@@ -16,6 +16,8 @@ pub struct SessionSelector {
     filtered_indices: Vec<usize>,
     /// Index of the active session (highlighted green)
     active_index: Option<usize>,
+    /// Number of live sessions (indices >= this are history items)
+    live_count: usize,
 }
 
 impl SessionSelector {
@@ -27,6 +29,7 @@ impl SessionSelector {
             state,
             filtered_indices: Vec::new(),
             active_index: None,
+            live_count: 0,
         }
     }
 
@@ -35,11 +38,17 @@ impl SessionSelector {
         self.query.clear();
         self.filtered_indices.clear();
         self.state.select(Some(0));
+        self.live_count = 0;
     }
 
     /// Set the index of the active session (will be highlighted green).
     pub fn set_active_index(&mut self, index: Option<usize>) {
         self.active_index = index;
+    }
+
+    /// Set the number of live sessions (indices >= this are history items).
+    pub fn set_live_count(&mut self, count: usize) {
+        self.live_count = count;
     }
 
     /// Add a character to the query and update the filter.
@@ -57,6 +66,13 @@ impl SessionSelector {
     pub fn selected_original_index(&self) -> Option<usize> {
         let selected = self.state.selected()?;
         self.filtered_indices.get(selected).copied()
+    }
+
+    /// Check if the currently selected item is a history (dead) session.
+    pub fn is_selected_history(&self) -> bool {
+        self.selected_original_index()
+            .map(|i| i >= self.live_count)
+            .unwrap_or(false)
     }
 
     /// Move selection up in the filtered list.
@@ -171,12 +187,14 @@ impl SessionSelector {
         frame.render_widget(input, input_area);
 
         // Build filtered list items
+        let live_count = self.live_count;
         let items: Vec<ListItem> = self
             .filtered_indices
             .iter()
             .map(|&i| {
                 let (name, path) = &sessions[i];
                 let is_active = self.active_index == Some(i);
+                let is_history = i >= live_count;
                 let available_width = (popup_width as usize).saturating_sub(4);
                 let path_width = available_width.saturating_sub(name.len() + 3);
 
@@ -190,17 +208,25 @@ impl SessionSelector {
                     .saturating_sub(name.len())
                     .saturating_sub(path_display.len());
 
-                // Active session is highlighted green
+                // Active session: green, history: dark gray, normal: white
                 let name_style = if is_active {
                     Style::default().fg(Color::Green)
+                } else if is_history {
+                    Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default().fg(Color::White)
+                };
+
+                let path_style = if is_history {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Gray)
                 };
 
                 Line::from(vec![
                     Span::styled(name.clone(), name_style),
                     Span::raw(" ".repeat(padding)),
-                    Span::styled(path_display, Style::default().fg(Color::Gray)),
+                    Span::styled(path_display, path_style),
                 ])
             })
             .map(ListItem::new)

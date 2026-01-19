@@ -20,6 +20,7 @@ impl MainView {
         Self
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         frame: &mut Frame,

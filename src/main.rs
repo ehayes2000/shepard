@@ -1,4 +1,5 @@
 mod config;
+mod history;
 mod pty_widget;
 mod session;
 mod session_manager;
