@@ -24,7 +24,7 @@ impl Config {
     fn config_path() -> anyhow::Result<PathBuf> {
         let home =
             dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not find home directory"))?;
-        Ok(home.join(".shepard").join("config.json"))
+        Ok(home.join(".shepherd").join("config.json"))
     }
 
     pub fn load() -> anyhow::Result<Self> {
