@@ -130,7 +130,7 @@ struct EventLog {
 
 impl EventLog {
     fn new() -> Self {
-        let path = dirs::home_dir().map(|h| h.join(".shepard").join("events.log"));
+        let path = dirs::home_dir().map(|h| h.join(".shepherd").join("events.log"));
         Self { path }
     }
 
