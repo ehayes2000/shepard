@@ -60,7 +60,7 @@ const CTRL_BACKSLASH: u8 = 0x1c;
 const CTRL_W: u8 = 0x17;
 const CTRL_D: u8 = 0x04;
 const CTRL_K: u8 = 0x0B;
-const TAB: u8 = 0x09;
+const CTRL_Y: u8 = 0x19;
 
 #[derive(Default, Clone, PartialEq)]
 enum UiMode {
@@ -432,7 +432,7 @@ impl TuiSessionManager {
                     self.close_shell_pane();
                     return Ok(true);
                 }
-                [b] if *b == TAB => {
+                [b] if *b == CTRL_Y => {
                     self.cycle_shell_pane();
                     return Ok(true);
                 }

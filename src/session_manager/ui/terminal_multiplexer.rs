@@ -102,7 +102,7 @@ impl TerminalMultiplexer {
             Span::raw(" Split  "),
             Span::styled("^W", Style::default().fg(Color::Magenta)),
             Span::raw(" Close  "),
-            Span::styled("Tab", Style::default().fg(Color::Magenta)),
+            Span::styled("^Y", Style::default().fg(Color::Magenta)),
             Span::raw(" Cycle"),
         ]);
 
