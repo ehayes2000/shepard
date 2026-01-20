@@ -86,13 +86,9 @@ impl Workflow for WorktreeWorkflow {
         // Build worktree path: <workflows_path>/<reponame>/<sessionname>
         let worktree_path = config.workflows_path.join(&repo_name).join(session_name);
 
-        // Fetch and update local main branch from origin
+        // Fetch latest from origin
         let output = Command::new("git")
-            .args([
-                "fetch",
-                "origin",
-                &format!("{}:{}", main_branch, main_branch),
-            ])
+            .args(["fetch", "origin", &main_branch])
             .output()
             .map_err(|e| Self::error(format!("failed to run git fetch: {}", e)))?;
 
@@ -105,7 +101,7 @@ impl Workflow for WorktreeWorkflow {
             )));
         }
 
-        // Create the worktree with a new branch based on main
+        // Create the worktree with a new branch based on origin/main
         let worktree_path_str = worktree_path
             .to_str()
             .ok_or_else(|| Self::error("worktree path contains invalid UTF-8"))?;
@@ -117,7 +113,7 @@ impl Workflow for WorktreeWorkflow {
                 "-b",
                 session_name,
                 worktree_path_str,
-                &main_branch,
+                &format!("origin/{}", main_branch),
             ])
             .output()
             .map_err(|e| Self::error(format!("failed to run git worktree add: {}", e)))?;
