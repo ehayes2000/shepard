@@ -3,8 +3,8 @@ mod ui;
 
 pub use ui::StatusMessage;
 use ui::{
-    CreateDialog, DeleteConfirmDialog, HelpPopup, KillConfirmDialog, MainView, SelectorItemKind,
-    SessionSelector, StatusBar, TerminalMultiplexer, WorktreeCleanupDialog,
+    CreateDialog, DeleteConfirmDialog, HelpPopup, KillConfirmDialog, MainView, QuitConfirmDialog,
+    SelectorItemKind, SessionSelector, StatusBar, TerminalMultiplexer, WorktreeCleanupDialog,
 };
 
 use std::collections::HashMap;
@@ -70,6 +70,7 @@ enum UiMode {
     ListSessions,
     NewSession,
     KillConfirmation,
+    QuitConfirmation,
     WorktreeCleanup,
     WorktreeDeleteConfirm,
 }
@@ -91,6 +92,7 @@ pub struct TuiSessionManager {
     session_selector: SessionSelector,
     create_dialog: CreateDialog,
     kill_confirm_dialog: KillConfirmDialog,
+    quit_confirm_dialog: QuitConfirmDialog,
     worktree_cleanup_dialog: WorktreeCleanupDialog,
     delete_confirm_dialog: DeleteConfirmDialog,
     status_bar: StatusBar,
@@ -164,6 +166,7 @@ impl TuiSessionManager {
             session_selector: SessionSelector::new(),
             create_dialog: CreateDialog::new(),
             kill_confirm_dialog: KillConfirmDialog::new(),
+            quit_confirm_dialog: QuitConfirmDialog::new(),
             worktree_cleanup_dialog: WorktreeCleanupDialog::new(),
             delete_confirm_dialog: DeleteConfirmDialog::new(),
             status_bar,
@@ -298,6 +301,9 @@ impl TuiSessionManager {
                             UiMode::NewSession => self.handle_new_session_input(&bytes)?,
                             UiMode::KillConfirmation => {
                                 self.handle_kill_confirmation_input(&bytes)?
+                            }
+                            UiMode::QuitConfirmation => {
+                                self.handle_quit_confirmation_input(&bytes)?
                             }
                             UiMode::WorktreeCleanup => {
                                 self.handle_worktree_cleanup_input(&bytes)?
@@ -486,7 +492,7 @@ impl TuiSessionManager {
                 }
             }
             CTRL_D => {
-                self.should_quit = true;
+                self.mode = UiMode::QuitConfirmation;
             }
             CTRL_K => {
                 if self.mode == UiMode::WorktreeCleanup {
@@ -577,6 +583,9 @@ impl TuiSessionManager {
                 }
                 UiMode::KillConfirmation => {
                     self.kill_confirm_dialog.render(frame, area);
+                }
+                UiMode::QuitConfirmation => {
+                    self.quit_confirm_dialog.render(frame, area);
                 }
                 UiMode::WorktreeCleanup => {
                     self.worktree_cleanup_dialog.render(frame, area);
@@ -889,6 +898,30 @@ impl TuiSessionManager {
                 self.mode = UiMode::Normal;
             }
             // 'n' or 'N' or any other key - cancel
+            b'n' | b'N' => {
+                self.mode = UiMode::Normal;
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn handle_quit_confirmation_input(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        match bytes[0] {
+            // Escape key
+            0x1b if bytes.len() == 1 => {
+                self.mode = UiMode::Normal;
+            }
+            // 'y' or 'Y' - confirm quit
+            b'y' | b'Y' => {
+                self.should_quit = true;
+            }
+            // 'n' or 'N' - cancel
             b'n' | b'N' => {
                 self.mode = UiMode::Normal;
             }
