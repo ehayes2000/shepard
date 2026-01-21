@@ -9,9 +9,15 @@ pub struct StatusEvent {
     pub event: EventKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventKind {
+    /// Claude finished and is waiting for user input
     Stop,
+    /// Claude started running a tool
+    ToolStart(String),
+    /// Claude finished running a tool
+    ToolEnd,
+    /// Generic notification
     Notification,
 }
 
@@ -86,7 +92,7 @@ impl StatusSocket {
     /// Parse a JSON event message
     fn parse_event(line: &str) -> Option<StatusEvent> {
         // Simple JSON parsing without serde
-        // Expected format: {"session":"name","event":"stop"|"notification"}
+        // Expected format: {"session":"name","event":"stop"|"tool_start"|"tool_end"|"notification","tool":"ToolName"}
         let line = line.trim();
         if !line.starts_with('{') || !line.ends_with('}') {
             return None;
@@ -95,7 +101,8 @@ impl StatusSocket {
         let inner = &line[1..line.len() - 1];
 
         let mut session = None;
-        let mut event = None;
+        let mut event_str = None;
+        let mut tool = None;
 
         for part in inner.split(',') {
             let part = part.trim();
@@ -105,17 +112,23 @@ impl StatusSocket {
 
                 match key {
                     "session" => session = Some(value.to_string()),
-                    "event" => {
-                        event = match value {
-                            "stop" => Some(EventKind::Stop),
-                            "notification" => Some(EventKind::Notification),
-                            _ => None,
-                        }
-                    }
+                    "event" => event_str = Some(value.to_string()),
+                    "tool" => tool = Some(value.to_string()),
                     _ => {}
                 }
             }
         }
+
+        let event = match event_str.as_deref() {
+            Some("stop") => Some(EventKind::Stop),
+            Some("tool_start") => {
+                let tool_name = tool.unwrap_or_else(|| "unknown".to_string());
+                Some(EventKind::ToolStart(tool_name))
+            }
+            Some("tool_end") => Some(EventKind::ToolEnd),
+            Some("notification") => Some(EventKind::Notification),
+            _ => None,
+        };
 
         match (session, event) {
             (Some(session), Some(event)) => Some(StatusEvent { session, event }),
@@ -151,6 +164,34 @@ mod tests {
         let event = event.unwrap();
         assert_eq!(event.session, "my-feature");
         assert_eq!(event.event, EventKind::Notification);
+    }
+
+    #[test]
+    fn test_parse_event_tool_start() {
+        let event =
+            StatusSocket::parse_event(r#"{"session":"dev","event":"tool_start","tool":"Bash"}"#);
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.session, "dev");
+        assert_eq!(event.event, EventKind::ToolStart("Bash".to_string()));
+    }
+
+    #[test]
+    fn test_parse_event_tool_start_no_tool() {
+        let event = StatusSocket::parse_event(r#"{"session":"dev","event":"tool_start"}"#);
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.session, "dev");
+        assert_eq!(event.event, EventKind::ToolStart("unknown".to_string()));
+    }
+
+    #[test]
+    fn test_parse_event_tool_end() {
+        let event = StatusSocket::parse_event(r#"{"session":"dev","event":"tool_end"}"#);
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.session, "dev");
+        assert_eq!(event.event, EventKind::ToolEnd);
     }
 
     #[test]

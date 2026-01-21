@@ -11,10 +11,13 @@ pub enum SessionView {
 }
 
 /// Activity status of a Claude session (for hook notifications)
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default)]
 pub enum SessionActivity {
+    /// Claude is working (default state)
     #[default]
     Active,
+    /// Claude is currently running a tool
+    RunningTool(String),
     /// Claude stopped and needs user attention
     Stopped,
 }
