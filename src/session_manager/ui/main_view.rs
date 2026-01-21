@@ -4,8 +4,8 @@ use std::sync::Arc;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
-    text::Line,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders},
 };
 use vt100::Screen;
@@ -29,6 +29,7 @@ impl MainView {
         active_path: Option<&Path>,
         active_view: SessionView,
         background_count: usize,
+        stopped_count: usize,
         bottom_left: Line<'static>,
         bottom_center: Option<Line<'static>>,
         scroll_offset: usize,
@@ -48,14 +49,12 @@ impl MainView {
 
         let total_sessions = background_count + if active_name.is_some() { 1 } else { 0 };
         let session_count_text = if total_sessions > 1 {
-            format!(" {} Sessions ", total_sessions)
+            format!("{} Sessions", total_sessions)
         } else {
             String::new()
         };
 
-        let bottom_right = active_path
-            .map(|p| format!(" {} ", path_relative_to_home(p)))
-            .unwrap_or_default();
+        let path_text = active_path.map(path_relative_to_home).unwrap_or_default();
 
         let mut block = Block::default()
             .borders(Borders::ALL)
@@ -70,16 +69,49 @@ impl MainView {
             block = block.title_bottom(center.centered());
         }
 
-        // Bottom right: session count + path
-        let right_text = if session_count_text.is_empty() {
-            bottom_right
-        } else if bottom_right.is_empty() {
-            session_count_text
-        } else {
-            format!("{} │{}", session_count_text, bottom_right)
-        };
-        if !right_text.is_empty() {
-            block = block.title_bottom(Line::from(right_text).right_aligned());
+        // Bottom right: stopped indicator + session count + path
+        let mut right_spans: Vec<Span> = Vec::new();
+
+        // Add stopped indicator if any sessions are stopped
+        if stopped_count > 0 {
+            right_spans.push(Span::styled(
+                "●",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            right_spans.push(Span::styled(
+                format!(" {}", stopped_count),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+
+        // Add separator if we have both indicator and other info
+        if !right_spans.is_empty() && (!session_count_text.is_empty() || !path_text.is_empty()) {
+            right_spans.push(Span::raw(" │ "));
+        }
+
+        // Add session count
+        if !session_count_text.is_empty() {
+            right_spans.push(Span::raw(session_count_text));
+            if !path_text.is_empty() {
+                right_spans.push(Span::raw(" │ "));
+            }
+        }
+
+        // Add path
+        if !path_text.is_empty() {
+            right_spans.push(Span::raw(path_text));
+        }
+
+        // Add padding
+        if !right_spans.is_empty() {
+            right_spans.insert(0, Span::raw(" "));
+            right_spans.push(Span::raw(" "));
+        }
+
+        if !right_spans.is_empty() {
+            block = block.title_bottom(Line::from(right_spans).right_aligned());
         }
 
         let inner = block.inner(area);

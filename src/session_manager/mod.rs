@@ -23,11 +23,12 @@ use std::sync::mpsc::{self, Receiver};
 use crate::config::Config;
 use crate::history::SessionHistory;
 use crate::session::{AttachedSession, SharedSize};
+use crate::status_socket::{EventKind, StatusSocket};
 use crate::workflows::{Workflow, WorktreeWorkflow};
 
 use std::sync::mpsc::Sender;
 
-use session_pair::{ActivePair, BackgroundPair, SessionView};
+use session_pair::{ActivePair, BackgroundPair, SessionActivity, SessionView};
 
 const BUF_SIZE: usize = 1024;
 
@@ -111,6 +112,8 @@ pub struct TuiSessionManager {
     multiplexers: HashMap<String, TerminalMultiplexer>,
     /// Flag to signal the main loop to exit
     should_quit: bool,
+    /// Status socket for receiving hook events from Claude sessions
+    status_socket: Option<StatusSocket>,
 }
 
 impl TuiSessionManager {
@@ -150,6 +153,9 @@ impl TuiSessionManager {
         let (status_bar, status_tx) = StatusBar::new();
         let history = SessionHistory::load().unwrap_or_default();
 
+        // Try to create status socket, but don't fail if it doesn't work
+        let status_socket = StatusSocket::new().ok();
+
         Ok(Self {
             terminal,
             active: None,
@@ -178,6 +184,7 @@ impl TuiSessionManager {
             history,
             multiplexers: HashMap::new(),
             should_quit: false,
+            status_socket,
         })
     }
 
@@ -191,6 +198,34 @@ impl TuiSessionManager {
         AttachedSession::new(command, args, tx, self.size.clone(), Some(cwd))
     }
 
+    fn create_claude_session(
+        &self,
+        name: &str,
+        command: &str,
+        args: &[&str],
+        cwd: &Path,
+    ) -> anyhow::Result<AttachedSession> {
+        let (tx, _rx) = mpsc::channel();
+
+        // Build env vars for shepherd hooks integration
+        let socket_path = self
+            .status_socket
+            .as_ref()
+            .map(|s| s.socket_path().to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let env_vars: Vec<(&str, &str)> = if !socket_path.is_empty() {
+            vec![
+                ("SHEPHERD_SESSION", name),
+                ("SHEPHERD_SOCKET", socket_path.as_str()),
+            ]
+        } else {
+            vec![]
+        };
+
+        AttachedSession::new_with_env(command, args, tx, self.size.clone(), Some(cwd), &env_vars)
+    }
+
     pub fn add_claude_session(
         &mut self,
         name: &str,
@@ -199,7 +234,7 @@ impl TuiSessionManager {
         cwd: &Path,
         resumed: bool,
     ) -> anyhow::Result<()> {
-        let session = self.create_session(command, args, cwd)?;
+        let session = self.create_claude_session(name, command, args, cwd)?;
 
         if let Some(old_pair) = self.active.take() {
             self.background.push(old_pair.detach());
@@ -284,6 +319,9 @@ impl TuiSessionManager {
 
             // Check for dead sessions before rendering
             self.check_dead_sessions();
+
+            // Poll for status events from Claude hooks
+            self.poll_status_events();
 
             let inner_size = self.render_frame()?;
             self.size.set(inner_size.height, inner_size.width);
@@ -385,6 +423,53 @@ impl TuiSessionManager {
                 }
             }
         }
+    }
+
+    /// Poll the status socket for events from Claude hooks and update session states
+    fn poll_status_events(&mut self) {
+        let Some(ref socket) = self.status_socket else {
+            return;
+        };
+
+        let events = socket.poll();
+        for event in events {
+            match event.event {
+                EventKind::Stop | EventKind::Notification => {
+                    // Update the activity state for the matching session
+                    if let Some(ref mut pair) = self.active
+                        && pair.name == event.session
+                    {
+                        pair.activity = SessionActivity::Stopped;
+                        continue;
+                    }
+
+                    // Check background sessions
+                    for pair in &mut self.background {
+                        if pair.name == event.session {
+                            pair.activity = SessionActivity::Stopped;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get count of sessions with stopped activity
+    pub fn stopped_session_count(&self) -> usize {
+        let active_stopped = self
+            .active
+            .as_ref()
+            .map(|p| p.activity == SessionActivity::Stopped)
+            .unwrap_or(false) as usize;
+
+        let bg_stopped = self
+            .background
+            .iter()
+            .filter(|p| p.activity == SessionActivity::Stopped)
+            .count();
+
+        active_stopped + bg_stopped
     }
 
     /// Clean up dead panes in multiplexers and switch view if needed
@@ -529,8 +614,23 @@ impl TuiSessionManager {
         let mode = self.mode.clone();
 
         // Get status bar render data
+        let stopped_count = self.stopped_session_count();
         let bottom_left = self.status_bar.render_bottom_left();
         let bottom_center = self.status_bar.render_bottom_center();
+
+        // Build set of stopped session names for selector rendering
+        let stopped_sessions: std::collections::HashSet<String> = self
+            .active
+            .iter()
+            .filter(|p| p.activity == SessionActivity::Stopped)
+            .map(|p| p.name.clone())
+            .chain(
+                self.background
+                    .iter()
+                    .filter(|p| p.activity == SessionActivity::Stopped)
+                    .map(|p| p.name.clone()),
+            )
+            .collect();
 
         let mut inner_area = ratatui::layout::Rect::default();
 
@@ -552,6 +652,7 @@ impl TuiSessionManager {
                 active_path.as_deref(),
                 active_view,
                 background_count,
+                stopped_count,
                 bottom_left,
                 bottom_center,
                 scroll_offset,
@@ -575,8 +676,12 @@ impl TuiSessionManager {
                     self.help_popup.render(frame, area);
                 }
                 UiMode::ListSessions => {
-                    self.session_selector
-                        .render(frame, area, &self.selector_sessions);
+                    self.session_selector.render(
+                        frame,
+                        area,
+                        &self.selector_sessions,
+                        &stopped_sessions,
+                    );
                 }
                 UiMode::NewSession => {
                     self.create_dialog.render(frame, area);
@@ -731,6 +836,8 @@ impl TuiSessionManager {
                     if pair.claude.is_dead() {
                         return Ok(());
                     }
+                    // Clear stopped state when user interacts with session
+                    pair.activity = SessionActivity::Active;
                     // Ignore write errors - check_dead_sessions will handle cleanup
                     let _ = pair.claude.write_input(bytes);
                 }

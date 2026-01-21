@@ -10,6 +10,15 @@ pub enum SessionView {
     Shell,
 }
 
+/// Activity status of a Claude session (for hook notifications)
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum SessionActivity {
+    #[default]
+    Active,
+    /// Claude stopped and needs user attention
+    Stopped,
+}
+
 /// An active session pair - claude session is attached (can receive input)
 /// Shell sessions are managed separately in TerminalMultiplexer
 pub struct ActivePair {
@@ -21,6 +30,8 @@ pub struct ActivePair {
     pub resumed: bool,
     /// Scroll offset for viewing scrollback history (0 = at bottom, showing current output)
     pub scroll_offset: usize,
+    /// Activity status from hook notifications
+    pub activity: SessionActivity,
 }
 
 impl ActivePair {
@@ -32,6 +43,7 @@ impl ActivePair {
             claude,
             resumed,
             scroll_offset: 0,
+            activity: SessionActivity::Active,
         }
     }
 
@@ -43,6 +55,7 @@ impl ActivePair {
             claude: self.claude.detach(),
             resumed: self.resumed,
             scroll_offset: self.scroll_offset,
+            activity: self.activity,
         }
     }
 }
@@ -58,6 +71,8 @@ pub struct BackgroundPair {
     pub resumed: bool,
     /// Scroll offset for viewing scrollback history (0 = at bottom, showing current output)
     pub scroll_offset: usize,
+    /// Activity status from hook notifications
+    pub activity: SessionActivity,
 }
 
 impl BackgroundPair {
@@ -69,6 +84,8 @@ impl BackgroundPair {
             claude: self.claude.attach()?,
             resumed: self.resumed,
             scroll_offset: self.scroll_offset,
+            // Preserve activity state - only cleared when user sends input
+            activity: self.activity,
         })
     }
 }

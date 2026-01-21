@@ -3,6 +3,7 @@ mod history;
 mod pty_widget;
 mod session;
 mod session_manager;
+mod status_socket;
 mod workflows;
 
 use session_manager::TuiSessionManager;

@@ -196,6 +196,17 @@ impl AttachedSession {
         size: SharedSize,
         cwd: Option<&Path>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_env(command, args, _tx, size, cwd, &[])
+    }
+
+    pub fn new_with_env(
+        command: &str,
+        args: &[&str],
+        _tx: std::sync::mpsc::Sender<Screen>,
+        size: SharedSize,
+        cwd: Option<&Path>,
+        env_vars: &[(&str, &str)],
+    ) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
 
         let (rows, cols) = size.get();
@@ -212,6 +223,9 @@ impl AttachedSession {
         cmd.args(args);
         if let Some(dir) = cwd {
             cmd.cwd(dir);
+        }
+        for (key, value) in env_vars {
+            cmd.env(key, value);
         }
 
         let child = pair.slave.spawn_command(cmd)?;
