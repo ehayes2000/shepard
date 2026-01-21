@@ -699,8 +699,8 @@ impl TuiSessionManager {
         if let Some(scroll_delta) = Self::parse_scroll_event(bytes) {
             if let Some(ref mut pair) = self.active {
                 // vt100 will clamp the scrollback position to the actual scrollback buffer size
-                // The max is SCROLLBACK (100) lines from session.rs
-                const MAX_SCROLLBACK: usize = 100;
+                // The max is SCROLLBACK (1000) lines from session.rs
+                const MAX_SCROLLBACK: usize = 1000;
 
                 if scroll_delta > 0 {
                     // Scroll up (show older content)
