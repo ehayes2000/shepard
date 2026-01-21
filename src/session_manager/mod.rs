@@ -433,23 +433,25 @@ impl TuiSessionManager {
 
         let events = socket.poll();
         for event in events {
-            match event.event {
-                EventKind::Stop | EventKind::Notification => {
-                    // Update the activity state for the matching session
-                    if let Some(ref mut pair) = self.active
-                        && pair.name == event.session
-                    {
-                        pair.activity = SessionActivity::Stopped;
-                        continue;
-                    }
+            let new_activity = match &event.event {
+                EventKind::Stop | EventKind::Notification => SessionActivity::Stopped,
+                EventKind::ToolStart(tool) => SessionActivity::RunningTool(tool.clone()),
+                EventKind::ToolEnd => SessionActivity::Active,
+            };
 
-                    // Check background sessions
-                    for pair in &mut self.background {
-                        if pair.name == event.session {
-                            pair.activity = SessionActivity::Stopped;
-                            break;
-                        }
-                    }
+            // Update the activity state for the matching session
+            if let Some(ref mut pair) = self.active
+                && pair.name == event.session
+            {
+                pair.activity = new_activity;
+                continue;
+            }
+
+            // Check background sessions
+            for pair in &mut self.background {
+                if pair.name == event.session {
+                    pair.activity = new_activity;
+                    break;
                 }
             }
         }
@@ -618,17 +620,15 @@ impl TuiSessionManager {
         let bottom_left = self.status_bar.render_bottom_left();
         let bottom_center = self.status_bar.render_bottom_center();
 
-        // Build set of stopped session names for selector rendering
-        let stopped_sessions: std::collections::HashSet<String> = self
+        // Build map of session names to their activity states for selector rendering
+        let session_states: std::collections::HashMap<String, SessionActivity> = self
             .active
             .iter()
-            .filter(|p| p.activity == SessionActivity::Stopped)
-            .map(|p| p.name.clone())
+            .map(|p| (p.name.clone(), p.activity.clone()))
             .chain(
                 self.background
                     .iter()
-                    .filter(|p| p.activity == SessionActivity::Stopped)
-                    .map(|p| p.name.clone()),
+                    .map(|p| (p.name.clone(), p.activity.clone())),
             )
             .collect();
 
@@ -680,7 +680,7 @@ impl TuiSessionManager {
                         frame,
                         area,
                         &self.selector_sessions,
-                        &stopped_sessions,
+                        &session_states,
                     );
                 }
                 UiMode::NewSession => {

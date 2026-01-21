@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use ratatui::{
     Frame,
@@ -7,6 +7,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
+
+use crate::session_manager::session_pair::SessionActivity;
 
 /// Categories of items in the session selector
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,13 +166,13 @@ impl SessionSelector {
     /// Render the session selector.
     /// `sessions` is a slice of (name, path) tuples.
     /// For worktree directories, name is empty and only path is shown.
-    /// `stopped_sessions` contains names of sessions that have stopped and need attention.
+    /// `session_states` maps session names to their current activity state.
     pub fn render(
         &mut self,
         frame: &mut Frame,
         area: Rect,
         sessions: &[(String, String)],
-        stopped_sessions: &HashSet<String>,
+        session_states: &HashMap<String, SessionActivity>,
     ) {
         // Calculate popup dimensions
         let max_name_len = sessions
@@ -234,7 +236,7 @@ impl SessionSelector {
                 let (name, path) = &sessions[i];
                 let is_active = self.active_index == Some(i);
                 let kind = self.item_kind(i);
-                let is_stopped = stopped_sessions.contains(name);
+                let activity = session_states.get(name);
                 let available_width = (popup_width as usize).saturating_sub(4);
 
                 // For worktree directories (empty name), show only the path
@@ -290,10 +292,10 @@ impl SessionSelector {
                 // Build spans with status indicator for live sessions
                 let mut spans = Vec::new();
                 if has_indicator {
-                    let indicator_color = if is_stopped {
-                        Color::Yellow // Stopped - needs attention
-                    } else {
-                        Color::Magenta // Running
+                    let indicator_color = match activity {
+                        Some(SessionActivity::Stopped) => Color::Yellow, // Needs attention
+                        Some(SessionActivity::RunningTool(_)) => Color::Cyan, // Running a tool
+                        _ => Color::Magenta,                             // Active/default
                     };
                     spans.push(Span::styled("● ", Style::default().fg(indicator_color)));
                 }
