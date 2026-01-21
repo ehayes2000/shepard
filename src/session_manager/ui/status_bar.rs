@@ -114,6 +114,10 @@ impl StatusBar {
             ])
         })
     }
+
+    pub fn current_level(&self) -> Option<StatusLevel> {
+        self.current.as_ref().map(|active| active.message.level)
+    }
 }
 
 impl Default for StatusBar {

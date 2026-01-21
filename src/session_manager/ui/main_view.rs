@@ -11,6 +11,7 @@ use ratatui::{
 use vt100::Screen;
 
 use super::super::session_pair::SessionView;
+use super::status_bar::StatusLevel;
 use crate::pty_widget::PtyWidget;
 
 pub struct MainView;
@@ -32,6 +33,7 @@ impl MainView {
         bottom_left: Line<'static>,
         bottom_center: Option<Line<'static>>,
         scroll_offset: usize,
+        status_level: Option<StatusLevel>,
     ) -> Rect {
         let area = frame.area();
 
@@ -57,9 +59,15 @@ impl MainView {
             .map(|p| format!(" {} ", path_relative_to_home(p)))
             .unwrap_or_default();
 
+        let border_color = match status_level {
+            Some(StatusLevel::Info) => Color::Cyan,
+            Some(StatusLevel::Err) => Color::Red,
+            None => Color::White,
+        };
+
         let mut block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White))
+            .border_style(Style::default().fg(border_color))
             .title(Line::from(top_title).left_aligned());
 
         // Bottom left: hotkeys

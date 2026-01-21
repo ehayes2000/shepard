@@ -531,6 +531,7 @@ impl TuiSessionManager {
         // Get status bar render data
         let bottom_left = self.status_bar.render_bottom_left();
         let bottom_center = self.status_bar.render_bottom_center();
+        let status_level = self.status_bar.current_level();
 
         let mut inner_area = ratatui::layout::Rect::default();
 
@@ -555,6 +556,7 @@ impl TuiSessionManager {
                 bottom_left,
                 bottom_center,
                 scroll_offset,
+                status_level,
             );
 
             // If in shell view, render the multiplexer inside the frame
