@@ -78,7 +78,7 @@ impl Callbacks for TerminalCallbacks {
     }
 }
 
-const SCROLLBACK: usize = 100;
+const SCROLLBACK: usize = 1000;
 const BUF_SIZE: usize = 8 * 1024;
 
 /// (rows, cols) ordered size stored in AtomicU32
