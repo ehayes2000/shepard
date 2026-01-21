@@ -1050,8 +1050,11 @@ impl TuiSessionManager {
 
     /// Get the current repository name from git.
     fn get_current_repo_name(&self) -> Option<String> {
+        // Use --git-common-dir to get the main repo's .git path, not the worktree's path.
+        // This ensures consistent repo names regardless of whether shepherd is launched
+        // from the main repo or from a worktree.
         let output = std::process::Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
+            .args(["rev-parse", "--git-common-dir"])
             .current_dir(&self.startup_path)
             .output()
             .ok()?;
@@ -1060,10 +1063,21 @@ impl TuiSessionManager {
             return None;
         }
 
-        let repo_path = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        let git_common_dir = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        let git_path = std::path::Path::new(&git_common_dir);
 
-        std::path::Path::new(&repo_path)
-            .file_name()
+        // The common dir is either ".git" (relative) or "/path/to/repo/.git" (absolute).
+        // If relative, resolve against startup_path first.
+        let absolute_git_path = if git_path.is_relative() {
+            self.startup_path.join(git_path)
+        } else {
+            git_path.to_path_buf()
+        };
+
+        // Get the parent to find the repo root, then extract the repo name.
+        absolute_git_path
+            .parent()
+            .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .map(|s| s.to_string())
     }
