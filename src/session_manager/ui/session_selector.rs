@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use ratatui::{
     Frame,
     layout::Rect,
@@ -162,7 +164,14 @@ impl SessionSelector {
     /// Render the session selector.
     /// `sessions` is a slice of (name, path) tuples.
     /// For worktree directories, name is empty and only path is shown.
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, sessions: &[(String, String)]) {
+    /// `stopped_sessions` contains names of sessions that have stopped and need attention.
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        sessions: &[(String, String)],
+        stopped_sessions: &HashSet<String>,
+    ) {
         // Calculate popup dimensions
         let max_name_len = sessions
             .iter()
@@ -225,6 +234,7 @@ impl SessionSelector {
                 let (name, path) = &sessions[i];
                 let is_active = self.active_index == Some(i);
                 let kind = self.item_kind(i);
+                let is_stopped = stopped_sessions.contains(name);
                 let available_width = (popup_width as usize).saturating_sub(4);
 
                 // For worktree directories (empty name), show only the path
@@ -243,8 +253,13 @@ impl SessionSelector {
                     return Line::from(vec![Span::styled(path_display, path_style)]);
                 }
 
-                // For live/recent sessions, show name and path
-                let path_width = available_width.saturating_sub(name.len() + 3);
+                // Account for status indicator in width calculation (2 chars: "● ")
+                // Live sessions always have an indicator (purple=running, yellow=stopped)
+                let has_indicator = kind == SelectorItemKind::Live;
+                let indicator_width = if has_indicator { 2 } else { 0 };
+                let path_width = available_width
+                    .saturating_sub(name.len() + 3)
+                    .saturating_sub(indicator_width);
 
                 let path_display = if path.len() > path_width {
                     format!("...{}", &path[path.len().saturating_sub(path_width - 3)..])
@@ -254,7 +269,8 @@ impl SessionSelector {
 
                 let padding = available_width
                     .saturating_sub(name.len())
-                    .saturating_sub(path_display.len());
+                    .saturating_sub(path_display.len())
+                    .saturating_sub(indicator_width);
 
                 // Active session: green, recent: dark gray, normal live: white
                 let name_style = if is_active {
@@ -271,11 +287,21 @@ impl SessionSelector {
                     Style::default().fg(Color::Gray)
                 };
 
-                Line::from(vec![
-                    Span::styled(name.clone(), name_style),
-                    Span::raw(" ".repeat(padding)),
-                    Span::styled(path_display, path_style),
-                ])
+                // Build spans with status indicator for live sessions
+                let mut spans = Vec::new();
+                if has_indicator {
+                    let indicator_color = if is_stopped {
+                        Color::Yellow // Stopped - needs attention
+                    } else {
+                        Color::Magenta // Running
+                    };
+                    spans.push(Span::styled("● ", Style::default().fg(indicator_color)));
+                }
+                spans.push(Span::styled(name.clone(), name_style));
+                spans.push(Span::raw(" ".repeat(padding)));
+                spans.push(Span::styled(path_display, path_style));
+
+                Line::from(spans)
             })
             .map(ListItem::new)
             .collect();
